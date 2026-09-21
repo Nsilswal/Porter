@@ -9,6 +9,10 @@ export interface PorterConfig {
   readonly demoMode: boolean;
   readonly adapterLatencyMs: number;
   readonly adapterFailureRate: number;
+  /** Off unless set. See apps/mcp-server/src/adapters.ts for the two gates. */
+  readonly squareAccessToken: string | undefined;
+  readonly squareBaseUrl: string;
+  readonly jobberAccessToken: string | undefined;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
@@ -40,5 +44,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
     demoMode: env.PORTER_DEMO_MODE !== "false",
     adapterLatencyMs: Number(env.PORTER_MOCK_LATENCY_MS ?? 0),
     adapterFailureRate: Number(env.PORTER_MOCK_FAILURE_RATE ?? 0),
+    squareAccessToken: env.PORTER_SQUARE_ACCESS_TOKEN || undefined,
+    // Sandbox by default. Pointing at production is a deliberate act.
+    squareBaseUrl: env.PORTER_SQUARE_BASE_URL ?? "https://connect.squareupsandbox.com",
+    jobberAccessToken: env.PORTER_JOBBER_ACCESS_TOKEN || undefined,
   };
 }

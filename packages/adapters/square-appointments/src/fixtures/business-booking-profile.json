@@ -1,0 +1,18 @@
+{
+  "business_booking_profile": {
+    "seller_id": "MLSELLER123",
+    "booking_enabled": true,
+    "booking_policy": "ACCEPT_ALL",
+    "allow_user_cancel": true,
+    "business_appointment_settings": {
+      "location_types": ["BUSINESS_LOCATION"],
+      "alignment_time": "HALF_HOURLY",
+      "min_booking_lead_time_seconds": 3600,
+      "max_booking_lead_time_seconds": 2592000,
+      "cancellation_window_seconds": 86400,
+      "cancellation_fee_money": { "amount": 2500, "currency": "USD" },
+      "cancellation_policy": "CUSTOM_POLICY",
+      "cancellation_policy_text": "Free to cancel up to 24 hours before. After that a $25 fee applies."
+    }
+  }
+}

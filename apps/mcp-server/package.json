@@ -11,6 +11,8 @@
     "@porter/adapter-mock": "workspace:*",
     "@porter/db": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "zod": "^3.24.1"
+    "zod": "^3.24.1",
+    "@porter/adapter-square-appointments": "workspace:*",
+    "@porter/adapter-jobber": "workspace:*"
   }
 }

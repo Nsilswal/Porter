@@ -310,10 +310,19 @@ Building the data rules now rather than retrofitting them matters: §4.3(e) and 
 
 *Exit:* a real MCP client completes search → availability → confirm → book → reschedule → cancel against the mock adapter.
 
-### Milestone 3 — Square Appointments and Jobber
-Square REST adapter (beauty/wellness). Jobber GraphQL adapter (home services, quote-required flows). Fixture-recorded tests. Both pass the conformance suite unchanged. Sandbox credentials only.
+### Milestone 3 — Square Appointments and Jobber ✅ **complete**
+Square REST adapter (beauty/wellness). Jobber GraphQL adapter (home services, quote-required flows). Both pass the conformance suite unchanged.
 
-*Exit:* both adapters pass conformance with zero changes to `core` — the proof that the interface generalises. **Gate:** upstream rights clearance (§9 item 7) resolved before either adapter ships against anything but fixtures.
+*Exit met:* both adapters pass conformance with **zero changes to `core`**. The only edit to an existing package was adding credential support to the conformance suite — test infrastructure, not the domain.
+
+The two platforms turned out to be shaped very differently, which made this a real test rather than a formality. Square publishes open slots and confirms immediately; Jobber has no open-slot API at all and returns `pending` until the business schedules the work. Both differences are carried by capability flags.
+
+**Two gates remain before either adapter touches a real account:**
+
+1. **Upstream rights clearance** (§9 item 7), still open.
+2. **Fixture re-recording.** Both adapters are tested against wire-level fakes written from published documentation, not recorded sandbox traffic. Square's API is fully documented. **Jobber's full schema is behind a developer login**, so its mutation inputs are inferred; every unverified shape is listed under `VERIFICATION STATUS` in `packages/adapters/jobber/src/api.ts`.
+
+Both adapters are wired into the MCP server but default to **off**, and Square defaults to the sandbox host.
 
 ### Milestone 4 — Payments, confirmation flow, audit log
 Stripe Connect integration in test mode; deposits and full payments; `pay_or_deposit` wired to the confirmation envelope; audit log complete and queryable; cancellation fees computed from real provider policies; rate limiting live.

@@ -1,0 +1,8 @@
+{
+  "team_member_booking_profiles": [
+    { "team_member_id": "TM_ALEX", "display_name": "Alex", "is_bookable": true },
+    { "team_member_id": "TM_JO", "display_name": "Jo", "is_bookable": true },
+    { "team_member_id": "TM_RAY", "display_name": "Ray", "is_bookable": true },
+    { "team_member_id": "TM_OFF", "display_name": "Sam", "is_bookable": false }
+  ]
+}

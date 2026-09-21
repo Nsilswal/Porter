@@ -18,6 +18,11 @@ export interface ConformanceFixtures {
   readonly customer: Record<string, string>;
   /** Optional: force the adapter into a failure mode, to check error mapping. */
   readonly makeFailingAdapter?: () => ProviderAdapter | Promise<ProviderAdapter>;
+  /**
+   * Credentials placed on every AdapterContext the suite builds. Remote
+   * adapters need these; the mock adapter ignores them.
+   */
+  readonly credentials?: Readonly<Record<string, string>>;
 }
 
 export function makeContext(overrides: Partial<AdapterContext> = {}): AdapterContext {
@@ -32,6 +37,9 @@ export function makeContext(overrides: Partial<AdapterContext> = {}): AdapterCon
 }
 
 export function runAdapterConformance(name: string, fixtures: ConformanceFixtures): void {
+  const ctx = (overrides: Partial<AdapterContext> = {}): AdapterContext =>
+    makeContext({ credentials: fixtures.credentials ?? {}, ...overrides });
+
   describe(`ProviderAdapter conformance: ${name}`, () => {
     it("declares a stable identity and capability set", async () => {
       const adapter = await fixtures.makeAdapter();
@@ -67,7 +75,7 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
       const adapter = await fixtures.makeAdapter();
       const results = await adapter.searchProviders(
         { categories: [fixtures.searchCategory], limit: 10 },
-        makeContext(),
+        ctx(),
       );
       expect(results.length).toBeGreaterThan(0);
 
@@ -91,16 +99,16 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
 
     it("returns availability inside the requested window, stamped with fetchedAt", async () => {
       const adapter = await fixtures.makeAdapter();
-      const ctx = makeContext();
-      const [first] = await adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 1 }, ctx);
+      const c = ctx();
+      const [first] = await adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 1 }, c);
       expect(first).toBeDefined();
       const service = first!.services.find((s) => !s.quoteRequired) ?? first!.services[0]!;
 
-      const from = new Date(ctx.now.getTime() + 60 * 60_000);
+      const from = new Date(c.now.getTime() + 60 * 60_000);
       const to = new Date(from.getTime() + 7 * 24 * 60 * 60_000);
       const slots = await adapter.getAvailability(
         { providerId: first!.provider.id, serviceId: service.id, from, to, limit: 20 },
-        ctx,
+        c,
       );
 
       for (const slot of slots) {
@@ -114,15 +122,15 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
 
     it("completes the booking lifecycle and reports a cancellation policy", async () => {
       const adapter = await fixtures.makeAdapter();
-      const ctx = makeContext();
-      const [first] = await adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 1 }, ctx);
+      const c = ctx();
+      const [first] = await adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 1 }, c);
       const provider = first!.provider;
       const service = first!.services.find((s) => !s.quoteRequired) ?? first!.services[0]!;
 
-      const from = new Date(ctx.now.getTime() + 60 * 60_000);
+      const from = new Date(c.now.getTime() + 60 * 60_000);
       const slots = await adapter.getAvailability(
         { providerId: provider.id, serviceId: service.id, from, to: new Date(from.getTime() + 14 * 24 * 60 * 60_000), limit: 5 },
-        ctx,
+        c,
       );
       expect(slots.length).toBeGreaterThan(0);
       const slot = slots[0]!;
@@ -130,7 +138,7 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
       // checkSlot must confirm a slot that getAvailability just returned.
       const rechecked = await adapter.checkSlot(
         { providerId: provider.id, serviceId: service.id, startsAt: slot.startsAt, providerSlotRef: slot.providerSlotRef },
-        ctx,
+        c,
       );
       expect(rechecked).not.toBeNull();
 
@@ -145,7 +153,7 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
           customer: fixtures.customer,
           idempotencyKey: "conformance-key-1",
         },
-        ctx,
+        c,
       );
 
       expect(["pending", "confirmed"]).toContain(booking.status);
@@ -155,11 +163,11 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
       // The slot must no longer be bookable once taken.
       const afterBooking = await adapter.checkSlot(
         { providerId: provider.id, serviceId: service.id, startsAt: slot.startsAt, providerSlotRef: slot.providerSlotRef },
-        ctx,
+        c,
       );
       expect(afterBooking).toBeNull();
 
-      const policy = await adapter.getCancellationPolicy(booking.providerBookingRef, ctx);
+      const policy = await adapter.getCancellationPolicy(booking.providerBookingRef, c);
       expect(typeof policy.known).toBe("boolean");
       // An unknown policy must be reported as unknown, not as a zero fee.
       if (!policy.known) {
@@ -169,7 +177,7 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
       if (adapter.capabilities.reschedule) {
         const later = await adapter.getAvailability(
           { providerId: provider.id, serviceId: service.id, from: new Date(slot.endsAt.getTime() + 60 * 60_000), to: new Date(from.getTime() + 21 * 24 * 60 * 60_000), limit: 5 },
-          ctx,
+          c,
         );
         if (later.length > 0) {
           const target = later[0]!;
@@ -183,7 +191,7 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
               providerSlotRef: target.providerSlotRef,
               idempotencyKey: "conformance-key-2",
             },
-            ctx,
+            c,
           );
           expect(moved.startsAt.getTime()).toBe(target.startsAt.getTime());
           expect(["pending", "confirmed"]).toContain(moved.status);
@@ -192,21 +200,21 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
 
       const cancelled = await adapter.cancelBooking(
         { bookingRef: booking.providerBookingRef, providerId: provider.id, reason: "conformance", idempotencyKey: "conformance-key-3" },
-        ctx,
+        c,
       );
       expect(cancelled.status).toBe("cancelled");
     });
 
     it("refuses to book a slot that has been taken", async () => {
       const adapter = await fixtures.makeAdapter();
-      const ctx = makeContext();
-      const [first] = await adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 1 }, ctx);
+      const c = ctx();
+      const [first] = await adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 1 }, c);
       const provider = first!.provider;
       const service = first!.services.find((s) => !s.quoteRequired) ?? first!.services[0]!;
-      const from = new Date(ctx.now.getTime() + 60 * 60_000);
+      const from = new Date(c.now.getTime() + 60 * 60_000);
       const slots = await adapter.getAvailability(
         { providerId: provider.id, serviceId: service.id, from, to: new Date(from.getTime() + 14 * 24 * 60 * 60_000), limit: 5 },
-        ctx,
+        c,
       );
       const slot = slots[0]!;
 
@@ -220,26 +228,26 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
         customer: fixtures.customer,
       };
 
-      await adapter.createBooking({ ...base, idempotencyKey: "dup-a" }, ctx);
-      await expect(adapter.createBooking({ ...base, idempotencyKey: "dup-b" }, ctx)).rejects.toSatisfy(
+      await adapter.createBooking({ ...base, idempotencyKey: "dup-a" }, c);
+      await expect(adapter.createBooking({ ...base, idempotencyKey: "dup-b" }, c)).rejects.toSatisfy(
         (e: unknown) => PorterError.is(e) && e.code === "SLOT_TAKEN",
       );
     });
 
     it("maps unknown identifiers to NOT_FOUND rather than crashing", async () => {
       const adapter = await fixtures.makeAdapter();
-      const ctx = makeContext();
+      const c = ctx();
       await expect(
-        adapter.cancelBooking({ bookingRef: "definitely-not-a-real-ref", providerId: "nope", idempotencyKey: "x" }, ctx),
+        adapter.cancelBooking({ bookingRef: "definitely-not-a-real-ref", providerId: "nope", idempotencyKey: "x" }, c),
       ).rejects.toSatisfy((e: unknown) => PorterError.is(e) && (e.code === "NOT_FOUND" || e.code === "ADAPTER_DOWN"));
     });
 
     it("maps transport failures to PorterError, never a raw throw", async () => {
       if (!fixtures.makeFailingAdapter) return;
       const adapter = await fixtures.makeFailingAdapter();
-      const ctx = makeContext();
+      const c = ctx();
       await expect(
-        adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 5 }, ctx),
+        adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 5 }, c),
       ).rejects.toSatisfy((e: unknown) => PorterError.is(e));
     });
 
@@ -247,9 +255,9 @@ export function runAdapterConformance(name: string, fixtures: ConformanceFixture
       const adapter = await fixtures.makeAdapter();
       const controller = new AbortController();
       controller.abort();
-      const ctx = makeContext({ signal: controller.signal });
+      const c = ctx({ signal: controller.signal });
       await expect(
-        adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 5 }, ctx),
+        adapter.searchProviders({ categories: [fixtures.searchCategory], limit: 5 }, c),
       ).rejects.toBeDefined();
     });
   });

@@ -1,0 +1,67 @@
+import { createFetchHttpClient, type Logger } from "@porter/shared";
+import type { ProviderAdapter } from "@porter/core";
+import { createMockAdapter } from "@porter/adapter-mock";
+import { createSquareAdapter } from "@porter/adapter-square-appointments";
+import { createJobberAdapter } from "@porter/adapter-jobber";
+import type { PorterConfig } from "./config.js";
+
+export interface AdapterRegistry {
+  readonly adapters: ProviderAdapter[];
+  /** Per-adapter credentials, handed to AdapterContext for one call at a time. */
+  readonly credentials: Record<string, Record<string, string>>;
+}
+
+/**
+ * Decide which platforms this instance talks to.
+ *
+ * The mock adapter is always present in demo mode, because Meta's review runs
+ * end-to-end tests and a reviewer must be able to complete a full booking
+ * without a real merchant account.
+ *
+ * Square and Jobber are enabled only when a token is configured, and both
+ * default to sandbox hosts. They stay off unless someone deliberately turns
+ * them on.
+ *
+ * Two gates before either may point at a real account:
+ *
+ *  1. Upstream rights clearance. Connector Terms 4.2 requires Porter to
+ *     represent it can sublicense provider data to Meta under 3.1, and
+ *     section 8 makes Porter indemnify Meta for it. Square's and Jobber's
+ *     developer terms have not been reviewed yet.
+ *  2. Fixture re-recording. Both adapters are currently tested against fakes
+ *     built from published documentation, not from recorded sandbox traffic.
+ *     Jobber's mutation inputs in particular are inferred — see the header of
+ *     packages/adapters/jobber/src/api.ts.
+ */
+export function buildAdapters(config: PorterConfig, log: Logger): AdapterRegistry {
+  const adapters: ProviderAdapter[] = [];
+  const credentials: Record<string, Record<string, string>> = {};
+  const http = createFetchHttpClient();
+
+  if (config.demoMode) {
+    adapters.push(
+      createMockAdapter({
+        latencyMs: config.adapterLatencyMs,
+        failureRate: config.adapterFailureRate,
+      }),
+    );
+  }
+
+  if (config.squareAccessToken) {
+    adapters.push(createSquareAdapter({ http, baseUrl: config.squareBaseUrl }));
+    credentials.square = { accessToken: config.squareAccessToken };
+    log.warn("square_adapter_enabled", { baseUrl: config.squareBaseUrl });
+  }
+
+  if (config.jobberAccessToken) {
+    adapters.push(createJobberAdapter({ http }));
+    credentials.jobber = { accessToken: config.jobberAccessToken };
+    log.warn("jobber_adapter_enabled", {});
+  }
+
+  if (adapters.length === 0) {
+    throw new Error("No adapters configured. Enable demo mode or provide provider credentials.");
+  }
+
+  return { adapters, credentials };
+}

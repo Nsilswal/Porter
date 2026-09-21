@@ -1,11 +1,29 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/shared" },
-    { "path": "packages/core" },
-    { "path": "packages/adapters/contract" },
-    { "path": "packages/adapters/mock" },
-    { "path": "packages/db" },
-    { "path": "apps/mcp-server" }
+    {
+      "path": "packages/shared"
+    },
+    {
+      "path": "packages/core"
+    },
+    {
+      "path": "packages/adapters/contract"
+    },
+    {
+      "path": "packages/adapters/mock"
+    },
+    {
+      "path": "packages/adapters/square-appointments"
+    },
+    {
+      "path": "packages/adapters/jobber"
+    },
+    {
+      "path": "packages/db"
+    },
+    {
+      "path": "apps/mcp-server"
+    }
   ]
 }

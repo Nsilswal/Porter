@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { BookingEngine, RateLimiter, RecordingPaymentGateway, createSigner, type Actor } from "@porter/core";
 import { createMemoryStore, type MemoryStore } from "@porter/db";
-import { createMockAdapter } from "@porter/adapter-mock";
+import { buildAdapters } from "./adapters.js";
 import { createLogger, systemClock, type Logger } from "@porter/shared";
 import { AuthServer, SCOPES } from "./auth.js";
 import { buildMcpServer, createTransport } from "./server.js";
@@ -37,13 +37,11 @@ export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
   const log: Logger = createLogger({ level: config.logLevel, base: { app: "porter-mcp" } });
 
   const store = createMemoryStore();
-  const adapter = createMockAdapter({
-    latencyMs: config.adapterLatencyMs,
-    failureRate: config.adapterFailureRate,
-  });
+  const { adapters, credentials } = buildAdapters(config, log);
 
   const engine = new BookingEngine({
-    adapters: [adapter],
+    adapters,
+    credentials,
     store,
     clock: systemClock,
     log,

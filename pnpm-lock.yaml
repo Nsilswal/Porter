@@ -26,9 +26,15 @@ importers:
       '@porter/adapter-contract':
         specifier: workspace:*
         version: link:../../packages/adapters/contract
+      '@porter/adapter-jobber':
+        specifier: workspace:*
+        version: link:../../packages/adapters/jobber
       '@porter/adapter-mock':
         specifier: workspace:*
         version: link:../../packages/adapters/mock
+      '@porter/adapter-square-appointments':
+        specifier: workspace:*
+        version: link:../../packages/adapters/square-appointments
       '@porter/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -51,7 +57,31 @@ importers:
         specifier: workspace:*
         version: link:../../shared
 
+  packages/adapters/jobber:
+    dependencies:
+      '@porter/adapter-contract':
+        specifier: workspace:*
+        version: link:../contract
+      '@porter/core':
+        specifier: workspace:*
+        version: link:../../core
+      '@porter/shared':
+        specifier: workspace:*
+        version: link:../../shared
+
   packages/adapters/mock:
+    dependencies:
+      '@porter/adapter-contract':
+        specifier: workspace:*
+        version: link:../contract
+      '@porter/core':
+        specifier: workspace:*
+        version: link:../../core
+      '@porter/shared':
+        specifier: workspace:*
+        version: link:../../shared
+
+  packages/adapters/square-appointments:
     dependencies:
       '@porter/adapter-contract':
         specifier: workspace:*

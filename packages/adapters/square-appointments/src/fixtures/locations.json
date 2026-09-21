@@ -1,0 +1,42 @@
+{
+  "locations": [
+    {
+      "id": "L7GK3M2QWERTY",
+      "name": "Shear Genius Salon",
+      "business_name": "Shear Genius Salon",
+      "description": "Neighbourhood salon for cuts, colour and styling.",
+      "status": "ACTIVE",
+      "timezone": "America/Los_Angeles",
+      "coordinates": { "latitude": 37.8118, "longitude": -122.2494 },
+      "address": {
+        "address_line_1": "418 Grand Ave",
+        "locality": "Oakland",
+        "administrative_district_level_1": "CA",
+        "postal_code": "94610",
+        "country": "US"
+      }
+    },
+    {
+      "id": "LQ9XBARBER01",
+      "name": "Fade District Barbers",
+      "business_name": "Fade District Barbers",
+      "status": "ACTIVE",
+      "timezone": "America/Los_Angeles",
+      "coordinates": { "latitude": 37.8044, "longitude": -122.2712 },
+      "address": {
+        "address_line_1": "22 Telegraph Ave",
+        "locality": "Oakland",
+        "administrative_district_level_1": "CA",
+        "postal_code": "94612",
+        "country": "US"
+      }
+    },
+    {
+      "id": "LCLOSED00000",
+      "name": "Old Location",
+      "status": "INACTIVE",
+      "timezone": "America/Los_Angeles",
+      "address": { "locality": "Oakland", "administrative_district_level_1": "CA", "postal_code": "94607", "country": "US" }
+    }
+  ]
+}

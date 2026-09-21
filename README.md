@@ -6,7 +6,9 @@ Porter does not onboard businesses one at a time. It integrates with the booking
 
 Targets Meta Muse first, and serves Claude and ChatGPT from the same MCP server.
 
-**Status: milestone 2 complete.** Core, mock adapter and MCP server work end to end locally, with tests. Square and Jobber adapters are milestone 3.
+**Status: milestone 3 complete.** Core, mock adapter and MCP server work end to end locally. Square Appointments and Jobber adapters are built and pass the conformance suite. Stripe payments are milestone 4.
+
+> **Neither remote adapter may be pointed at a real account yet.** Both are tested against wire-level fakes built from published documentation, not recorded sandbox traffic, and the upstream rights question in `docs/plan.md` section 9 item 7 is unresolved. See [Provider adapters](#provider-adapters).
 
 ---
 
@@ -45,6 +47,8 @@ packages/
   core/                domain model, taxonomy, booking engine, adapter interface
   adapters/contract/   the conformance suite every adapter must pass
   adapters/mock/       realistic fake businesses; tests and demo mode
+  adapters/square-appointments/  beauty and wellness, REST
+  adapters/jobber/     home services, GraphQL
   db/                  Drizzle schema, in-memory store
 apps/
   mcp-server/          remote MCP over Streamable HTTP + OAuth 2.1
@@ -64,6 +68,26 @@ docs/                  research, plan, and a local copy of the Connector Terms
 | `list_my_bookings` | The user's appointments |
 | `pay_or_deposit` | Pay or place a deposit |
 | `message_provider` | Message a business about a booking |
+
+## Provider adapters
+
+| Adapter | Vertical | Shape | Slot hold | Quotes | Cancellation policy |
+|---|---|---|---|---|---|
+| `mock` | both | slots | yes | yes | yes |
+| `square-appointments` | beauty, wellness | slots, confirmed immediately | no | no | yes, from the booking profile |
+| `jobber` | home services | arrival windows, business confirms later | no | yes | none published |
+
+Square and Jobber are genuinely different products, and the difference is carried by capability flags rather than by branches in core:
+
+- **Square** publishes open slots. You book a specific minute with a specific team member and it is confirmed immediately. The team member id travels as `providerSlotRef`, because dropping it would silently rebook with someone else.
+- **Jobber** has no open-slot API at all. It is field-service software: a customer asks for work in an arrival window and the business schedules it afterwards. So `getAvailability` returns *requestable windows*, and a booking comes back `pending` rather than `confirmed`. Saying "confirmed" would tell the user something untrue.
+
+Adding both required **zero changes to `packages/core`**. The only change to an existing package was adding credential support to the conformance suite, which is test infrastructure.
+
+### Before either talks to a real account
+
+1. **Upstream rights clearance.** Connector Terms 4.2 requires Porter to represent it can sublicense provider data to Meta under 3.1, and section 8 makes Porter indemnify Meta for it. Square's and Jobber's developer terms have not been reviewed.
+2. **Re-record the fixtures.** Both adapters are tested against wire-level fakes written from published documentation. Square's API is fully documented, so its shapes are solid. **Jobber's full schema sits behind a developer login**, so the mutation inputs are inferred — every one is listed under `VERIFICATION STATUS` at the top of `packages/adapters/jobber/src/api.ts`.
 
 ## How the design is shaped by the platform
 
@@ -89,7 +113,7 @@ Porter is built against the Muse Connector Terms and Policies, which are not mer
 pnpm test
 ```
 
-69 tests: unit, adapter conformance, prompt injection, compliance, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
+137 tests: unit, adapter conformance, prompt injection, compliance, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
 
 Any new adapter must pass the conformance suite in `packages/adapters/contract` unchanged. That is what makes "add a platform without touching core" a real claim.
 
