@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { makeContext } from "@porter/adapter-contract";
 import { PorterError, sanitize } from "@porter/shared";
-import { createSquarePublicAdapter, decodeEntities, extractWidget, parsePriceDescription, reservationIdFor, secondsToMinutes } from "./index.js";
+import { contactTokenFrom, createSquarePublicAdapter, decodeEntities, extractWidget, parsePriceDescription, reservationIdFor, secondsToMinutes } from "./index.js";
 import { FakeSquarePage, GREEN_ROOM, renderWidgetPage } from "./testing/fake-page.js";
 
 const URL_ = "https://book.squareup.com/appointments/site/location/LOC/services";
@@ -271,6 +271,14 @@ describe("booking through the buyer API", () => {
       ctx,
     );
     expect(cancelled.status).toBe("cancelled");
+  });
+
+  it("reads the buyer token whether or not Square wraps it", () => {
+    // Live responses put the token at the top level. Reading only the wrapped
+    // form failed every booking at the first write while quoting stayed green.
+    expect(contactTokenFrom({ contact_token: "top" })).toBe("top");
+    expect(contactTokenFrom({ current_buyer: { contact_token: "wrapped" } })).toBe("wrapped");
+    expect(contactTokenFrom({})).toBeUndefined();
   });
 
   it("reports a taken time instead of booking it", async () => {

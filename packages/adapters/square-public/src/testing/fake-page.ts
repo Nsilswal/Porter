@@ -81,7 +81,8 @@ export class FakeSquarePage implements HttpClient {
     }
     if (url.includes("/current_buyer/")) {
       if (body.current_buyer?.email?.endsWith("@example.com")) return json(422, { errors: { email: ["is invalid"] } });
-      return json(200, { current_buyer: { contact_token: "contact1", unit_token: body.unit_token } });
+      // Live shape: the token comes back at the top level, not wrapped.
+      return json(200, { unit_token: body.unit_token, contact_token: "contact1" });
     }
     if (url.endsWith("/reservations/cancel")) {
       return json(200, { id: body.id, status: "cancelled_by_buyer", is_cancelled: true, date_start: body.date_start, date_end: body.date_end });

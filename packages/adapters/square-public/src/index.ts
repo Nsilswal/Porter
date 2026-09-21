@@ -34,18 +34,20 @@ import {
   BUYER_API,
   availabilityBody,
   cardRequired,
+  contactTokenFrom,
   employeeTokensFor,
   locationTokenFromUrl,
   mapBuyerStatus,
   reservationIdFor,
   segmentBody,
   type BuyerAvailabilitySlot,
+  type BuyerContact,
   type BuyerReservation,
   type BuyerReservedTime,
 } from "./buyer.js";
 
 export * from "./widget.js";
-export { cardRequired, reservationIdFor } from "./buyer.js";
+export { cardRequired, contactTokenFrom, reservationIdFor } from "./buyer.js";
 
 /** A Square public booking site Porter knows about. */
 export interface SquarePublicSource {
@@ -271,7 +273,7 @@ export class SquarePublicAdapter implements ProviderAdapter {
       throw new PorterError("INVALID_REQUEST", "This booking needs a name, an email address and a phone number.");
     }
 
-    const buyer = await this.#post<{ current_buyer?: { contact_token?: string } }>(
+    const buyer = await this.#post<BuyerContact>(
       `/buyer/current_buyer/${encodeURIComponent(locationId)}`,
       {
         unit_token: locationId,
@@ -287,7 +289,7 @@ export class SquarePublicAdapter implements ProviderAdapter {
       ctx,
       "buyer",
     );
-    const contactToken = buyer.current_buyer?.contact_token;
+    const contactToken = contactTokenFrom(buyer);
     if (!contactToken) throw new PorterError("ADAPTER_DOWN", "That business's booking system did not accept the contact details.");
 
     const hold = await this.#post<BuyerReservedTime>(

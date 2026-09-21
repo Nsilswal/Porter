@@ -28,6 +28,21 @@ export interface BuyerReservedTime {
   readonly order?: { readonly id?: string } & Record<string, unknown>;
 }
 
+/**
+ * `POST /buyer/current_buyer/{unitToken}` answers with the token at the top
+ * level, and has also been seen wrapping it in `current_buyer`. Accept both:
+ * this is an undocumented endpoint, and a shape change here would otherwise
+ * fail every booking at the first write.
+ */
+export interface BuyerContact {
+  readonly contact_token?: string | null;
+  readonly current_buyer?: { readonly contact_token?: string | null } | null;
+}
+
+export function contactTokenFrom(response: BuyerContact | undefined): string | undefined {
+  return response?.contact_token ?? response?.current_buyer?.contact_token ?? undefined;
+}
+
 export interface BuyerReservation {
   readonly id: string;
   readonly status?: string;
