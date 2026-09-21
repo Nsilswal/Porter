@@ -340,7 +340,12 @@ export class SquarePublicAdapter implements ProviderAdapter {
     // "variable" means the business prices it in person. A range in the
     // description is shown as a range; anything vaguer stays quote-required.
     const isVariable = priceType === "variable" || priceCents === null || priceCents === 0;
-    const range = isVariable ? parsePriceDescription(priceDescription) : null;
+    // Merchants often put the range in the variation name rather than the
+    // price field — "BYKARTE — $100-170". Read the price field first, then
+    // fall back to the name, but only when it carries a currency symbol.
+    const range = isVariable
+      ? (parsePriceDescription(priceDescription) ?? parsePriceDescription(name, { requireCurrencySymbol: true }))
+      : null;
     const price: Money | undefined = !isVariable && priceCents !== null ? money(priceCents, currency) : undefined;
 
     return {

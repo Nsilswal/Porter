@@ -15,7 +15,8 @@
     "dev:mcp": "node --experimental-strip-types apps/mcp-server/src/index.ts",
     "submission:validate": "node --experimental-strip-types submission/validate.ts",
     "demo": "tsc --build && node apps/mcp-server/dist/demo.js",
-    "square:smoke": "tsc --build && node --env-file-if-exists=.env apps/mcp-server/dist/square-smoke.js"
+    "square:smoke": "tsc --build && node --env-file-if-exists=.env apps/mcp-server/dist/square-smoke.js",
+    "square:public": "tsc --build && node apps/mcp-server/dist/square-public-check.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

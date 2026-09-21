@@ -46,6 +46,14 @@ describe("widget extraction", () => {
     expect(parsePriceDescription("call us")).toBeNull();
     expect(parsePriceDescription(null)).toBeNull();
   });
+
+  it("only reads a range out of a name when it carries a currency symbol", () => {
+    // Merchants often put the range in the service name instead.
+    expect(parsePriceDescription("BYKARTE — $100-170", { requireCurrencySymbol: true })).toEqual({ minMinor: 10000, maxMinor: 17000 });
+    // Without the guard this would read "Cut 2-3" as a $2-$3 range.
+    expect(parsePriceDescription("Hair cut 2-3", { requireCurrencySymbol: true })).toBeNull();
+    expect(parsePriceDescription("Blow out — 1. TAKA", { requireCurrencySymbol: true })).toBeNull();
+  });
 });
 
 describe("services", () => {

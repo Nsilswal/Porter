@@ -25,10 +25,19 @@ That starts Porter in demo mode, connects a real MCP client over Streamable HTTP
 
 It also demonstrates the things that are easy to claim and hard to prove — that quoting a fee does not cancel anything, that a retry does not double-book, and that a business with a hostile name is treated as data.
 
+### Read any Square booking page
+
+```bash
+pnpm square:public                      # the built-in example
+pnpm square:public "https://book.squareup.com/appointments/<site>/location/<loc>/services"
+```
+
+No account, no key, no config. Prints the business, every service with real prices and durations, and the actual cancellation terms.
+
 ### Run the tests
 
 ```bash
-pnpm test        # 213 tests
+pnpm test        # 214 tests
 pnpm build       # typecheck everything
 ```
 
@@ -152,7 +161,7 @@ Porter never stores or enters card details. It keeps opaque gateway references, 
 pnpm test
 ```
 
-213 tests: unit, adapter conformance, prompt injection, compliance, payments, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
+214 tests: unit, adapter conformance, prompt injection, compliance, payments, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
 
 Any new adapter must pass the conformance suite in `packages/adapters/contract` unchanged. That is what makes "add a platform without touching core" a real claim.
 

@@ -151,8 +151,15 @@ export function secondsToMinutes(seconds: number | null | undefined, fallback = 
  * Only a clear low-to-high pair is accepted. Anything ambiguous returns null,
  * because a made-up range shown as a real one is worse than showing none.
  */
-export function parsePriceDescription(text: string | null | undefined): { minMinor: number; maxMinor: number } | null {
+export function parsePriceDescription(
+  text: string | null | undefined,
+  options: { requireCurrencySymbol?: boolean } = {},
+): { minMinor: number; maxMinor: number } | null {
   if (!text) return null;
+  // When reading from a field that is not specifically a price — a service
+  // name, say — insist on a currency symbol. Otherwise "Cut 2-3" becomes a
+  // $2-$3 range, which is worse than showing no price at all.
+  if (options.requireCurrencySymbol && !/[$£€]/.test(text)) return null;
   const numbers = [...text.matchAll(/\$?\s*([\d][\d,]*(?:\.\d{1,2})?)/g)].map((m) =>
     Math.round(Number.parseFloat(m[1]!.replace(/,/g, "")) * 100),
   );
