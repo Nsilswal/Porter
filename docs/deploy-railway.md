@@ -2,14 +2,32 @@
 
 Hosting is Railway, decided in `plan.md` §9. Database is Railway Postgres.
 
+## 0. Check the image locally first
+
+The Dockerfile is verified: it builds, runs as a non-root `node` user, and
+serves health, discovery, `/docs` and the MCP handshake.
+
+```bash
+docker build -t porter .
+docker run --rm -p 8080:8080 \
+  -e PORTER_ISSUER=http://127.0.0.1:8080 \
+  -e PORTER_SIGNING_SECRET=$(openssl rand -hex 32) \
+  -e PORTER_API_KEYS=demo-key:user_demo \
+  porter
+
+curl -s localhost:8080/healthz
+```
+
 ## 1. Create the service
 
 ```bash
+railway login
 railway init
 railway up
 ```
 
-Railway builds from the `Dockerfile`. The health check is `GET /healthz`.
+Railway reads `railway.json`, builds from the `Dockerfile` and health-checks
+`GET /healthz`.
 
 ## 2. Variables
 

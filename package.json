@@ -5,6 +5,7 @@
   "engines": {
     "node": ">=20"
   },
+  "packageManager": "pnpm@11.10.0",
   "scripts": {
     "build": "tsc --build",
     "clean": "tsc --build --clean",
@@ -13,7 +14,8 @@
     "test:watch": "vitest",
     "dev:mcp": "node --experimental-strip-types apps/mcp-server/src/index.ts",
     "submission:validate": "node --experimental-strip-types submission/validate.ts",
-    "demo": "tsc --build && node apps/mcp-server/dist/demo.js"
+    "demo": "tsc --build && node apps/mcp-server/dist/demo.js",
+    "square:smoke": "tsc --build && node --env-file-if-exists=.env apps/mcp-server/dist/square-smoke.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

@@ -2,14 +2,22 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 RUN corepack enable
+# pnpm asks before purging node_modules, and there is no TTY in a build.
+ENV CI=true
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json ./
 COPY packages ./packages
 COPY apps ./apps
 
-RUN pnpm install --frozen-lockfile
+# --ignore-scripts: nothing in this build needs a dependency's postinstall to
+# run, and not executing arbitrary install-time code in the image is the safer
+# default. esbuild's binary is only needed by the test tooling, not at runtime.
+RUN pnpm install --frozen-lockfile --ignore-scripts
 RUN pnpm build
-RUN pnpm prune --prod
+
+# No `pnpm prune --prod` here. It strips the workspace symlinks that link
+# apps/mcp-server to packages/*, and the server cannot resolve @porter/core
+# without them. The dev dependencies it would remove are a few tens of MB.
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
