@@ -30,8 +30,22 @@ import {
   type SquareWidgetService,
   type SquareWidgetVariation,
 } from "./widget.js";
+import {
+  BUYER_API,
+  availabilityBody,
+  cardRequired,
+  employeeTokensFor,
+  locationTokenFromUrl,
+  mapBuyerStatus,
+  reservationIdFor,
+  segmentBody,
+  type BuyerAvailabilitySlot,
+  type BuyerReservation,
+  type BuyerReservedTime,
+} from "./buyer.js";
 
 export * from "./widget.js";
+export { cardRequired, reservationIdFor } from "./buyer.js";
 
 /** A Square public booking site Porter knows about. */
 export interface SquarePublicSource {
@@ -62,19 +76,19 @@ interface CacheEntry {
  * see. That is the difference between covering the businesses who signed up
  * and covering the businesses who exist.
  *
- * What it gets: the business, its services and variations with real prices
- * and durations, staff, the location, the cancellation policy text, the
- * no-show cutoff, and per-variation no-show fees.
+ * What it gets from the page: the business, its services and variations with
+ * real prices and durations, staff, the location, the cancellation policy
+ * text, the no-show cutoff, and per-variation no-show fees.
  *
- * What it does not get: live availability, which the page loads separately.
- * So `getAvailability` returns nothing rather than guessing, and booking
- * hands the user a deep link to the business's own page — the same
- * escalation the web adapter uses, and for the same reason. A wrong read
- * shows a wrong price, which the user sees before agreeing. A wrong write
- * books the wrong appointment, and nobody finds out until they turn up.
+ * Open times and the booking itself come from the same buyer API the page
+ * calls (`app.squareup.com/appointments/api/buyer/...`). That confirms
+ * immediately when the business does not collect a card. A deposit, a
+ * no-show hold, or a required card on file needs a payment nonce minted in
+ * the browser, so those bookings hand the person the Square page instead of
+ * submitting a half-finished appointment.
  *
- * When a merchant *has* connected their account, prefer the API adapter: it
- * has live availability and can actually complete a booking.
+ * When a merchant has connected their account, prefer the API adapter: it
+ * has idempotency, reschedule, and a supported contract.
  */
 export class SquarePublicAdapter implements ProviderAdapter {
   readonly id: string;
@@ -102,9 +116,10 @@ export class SquarePublicAdapter implements ProviderAdapter {
       messaging: false,
       remoteBookingList: false,
       categories: [...new Set(options.sources.flatMap((s) => s.categories))],
-      // Nothing is submitted anywhere, so nothing is collected.
-      requiredCustomerFields: [],
-      optionalCustomerFields: [],
+      // The buyer API rejects a reservation without these. Notes ride along
+      // when the person added them; they are not required to book.
+      requiredCustomerFields: ["givenName", "familyName", "email", "phone"],
+      optionalCustomerFields: ["notes"],
     };
   }
 
@@ -142,19 +157,46 @@ export class SquarePublicAdapter implements ProviderAdapter {
   }
 
   /**
-   * The page loads open times separately, so Porter has none to offer.
-   *
-   * Returning invented slots would be exactly the "stale availability shown
-   * as bookable" failure the whole design exists to prevent.
+   * Open times from the buyer API. An empty response stays empty — Porter
+   * does not invent slots when Square has none.
    */
   async getAvailability(query: AvailabilityQuery, ctx: AdapterContext): Promise<Slot[]> {
     assertNotAborted(ctx.signal, this.id);
-    void query;
-    return [];
+    const loaded = await this.#ready(query.providerId, ctx);
+    if (!loaded) return [];
+    const match = this.#matchService(loaded.widget, query.serviceId);
+    if (!match) return [];
+
+    const tokens = employeeTokensFor(loaded.widget, match.variation);
+    if (tokens.length === 0 || !loaded.locationId) return [];
+
+    const slots = await this.#searchSlots(loaded, match, tokens, query.from, query.to, ctx);
+    return slots.slice(0, query.limit);
   }
 
-  async checkSlot(): Promise<Slot | null> {
-    return null;
+  async checkSlot(
+    query: { providerId: string; serviceId: string; startsAt: Date; providerSlotRef?: string },
+    ctx: AdapterContext,
+  ): Promise<Slot | null> {
+    assertNotAborted(ctx.signal, this.id);
+    const loaded = await this.#ready(query.providerId, ctx);
+    if (!loaded) return null;
+    const match = this.#matchService(loaded.widget, query.serviceId);
+    if (!match || !loaded.locationId) return null;
+
+    const tokens = employeeTokensFor(loaded.widget, match.variation, query.providerSlotRef);
+    if (tokens.length === 0) return null;
+
+    const windowEnd = new Date(query.startsAt.getTime() + 36 * 60 * 60_000);
+    const slots = await this.#searchSlots(loaded, match, tokens, query.startsAt, windowEnd, ctx);
+    const want = query.startsAt.getTime();
+    return (
+      slots.find((slot) => {
+        if (Math.abs(slot.startsAt.getTime() - want) > 1000) return false;
+        if (query.providerSlotRef && slot.providerSlotRef !== query.providerSlotRef) return false;
+        return true;
+      }) ?? null
+    );
   }
 
   /**
@@ -200,22 +242,319 @@ export class SquarePublicAdapter implements ProviderAdapter {
   async createBooking(request: CreateBookingRequest, ctx: AdapterContext): Promise<Booking> {
     assertNotAborted(ctx.signal, this.id);
     const source = this.#sourceFor(request.providerId);
-    throw humanActionRequired("unknown", source.url, {
-      provider_id: request.providerId,
-      why: "This business has not connected its booking system to us. Open their Square page to pick a time and finish booking.",
-    });
+    const entry = await this.#load(source, ctx);
+    const business = entry.widget.business ?? {};
+
+    if (cardRequired(business)) {
+      throw humanActionRequired("unknown", source.url, {
+        provider_id: request.providerId,
+        why: "This business collects a card or a deposit on its own page. Open that page to finish booking.",
+      });
+    }
+
+    const locationId = locationTokenFromUrl(source.url);
+    const match = this.#matchService(entry.widget, request.serviceId);
+    if (!locationId || !entry.widget.business_location_id || !match) {
+      throw new PorterError("NOT_FOUND", "We could not find that service.");
+    }
+
+    const staffToken = request.providerSlotRef ?? employeeTokensFor(entry.widget, match.variation)[0];
+    if (!staffToken) {
+      throw new PorterError("PROVIDER_UNAVAILABLE", "Nobody at that business is available to take this appointment.");
+    }
+
+    const given = request.customer.givenName;
+    const family = request.customer.familyName;
+    const email = request.customer.email;
+    const phone = request.customer.phone;
+    if (!given || !family || !email || !phone) {
+      throw new PorterError("INVALID_REQUEST", "This booking needs a name, an email address and a phone number.");
+    }
+
+    const buyer = await this.#post<{ current_buyer?: { contact_token?: string } }>(
+      `/buyer/current_buyer/${encodeURIComponent(locationId)}`,
+      {
+        unit_token: locationId,
+        current_buyer: {
+          first_name: given,
+          last_name: family,
+          email,
+          phone,
+          timezone: business.timezone ?? "UTC",
+        },
+      },
+      source.url,
+      ctx,
+      "buyer",
+    );
+    const contactToken = buyer.current_buyer?.contact_token;
+    if (!contactToken) throw new PorterError("ADAPTER_DOWN", "That business's booking system did not accept the contact details.");
+
+    const hold = await this.#post<BuyerReservedTime>(
+      "/buyer/reserved_times",
+      {
+        date_start: request.startsAt.toISOString(),
+        date_end: request.endsAt.toISOString(),
+        business_location_id: entry.widget.business_location_id,
+        segments: [segmentBody({ service: match.service, variation: match.variation, employeeToken: staffToken, lineItemUid: "1" })],
+      },
+      source.url,
+      ctx,
+      "hold",
+    );
+    if (!hold.id || !hold.order?.id) {
+      throw new PorterError("ADAPTER_DOWN", "That business's booking system did not hold the time.");
+    }
+
+    const location = entry.widget.locations?.[0] ?? {};
+    const reservationId = reservationIdFor(request.idempotencyKey);
+    const reservation = await this.#post<BuyerReservation>(
+      "/buyer/reservations",
+      {
+        id: reservationId,
+        order_id: hold.order.id,
+        order: hold.order,
+        reserved_time_id: hold.id,
+        business_location_id: entry.widget.business_location_id,
+        ...(request.notes ?? request.customer.notes ? { buyer_note: request.notes ?? request.customer.notes } : {}),
+        widget_id: entry.widget.id,
+        tzid: business.timezone ?? "UTC",
+        date_start: request.startsAt.toISOString(),
+        date_end: request.endsAt.toISOString(),
+        client: {
+          id: contactToken,
+          first_name: given,
+          last_name: family,
+          email,
+          phone,
+          timezone: business.timezone ?? "UTC",
+          business_id: business.id,
+          address: {},
+          custom_attributes_to_add: [],
+        },
+        location: {
+          type: location.type ?? "premises",
+          name: location.name,
+          address1: location.address1 ?? null,
+          address2: location.address2 ?? null,
+          city: location.city ?? null,
+          state: location.state ?? null,
+          zipcode: location.zipcode ?? null,
+        },
+        segments: [segmentBody({ service: match.service, variation: match.variation, employeeToken: staffToken, lineItemUid: "1" })],
+      },
+      source.url,
+      ctx,
+      "book",
+    );
+
+    const priced = this.#services(source, entry.widget).find((s) => s.id === request.serviceId);
+    const policy = await this.getServiceCancellationPolicy(
+      { providerId: request.providerId, serviceId: request.serviceId, startsAt: new Date(reservation.date_start ?? request.startsAt.toISOString()) },
+      ctx,
+    );
+    return this.#bookingFrom(request.providerId, request.serviceId, reservation, priced?.price, policy, ctx);
   }
 
   async rescheduleBooking(): Promise<Booking> {
     throw new PorterError("UNSUPPORTED_CAPABILITY", "That business's appointments have to be changed on their own booking page.");
   }
 
-  async cancelBooking(request: CancelRequest): Promise<Booking> {
-    void request;
-    throw new PorterError("UNSUPPORTED_CAPABILITY", "That business's appointments have to be cancelled on their own booking page.");
+  async cancelBooking(request: CancelRequest, ctx: AdapterContext): Promise<Booking> {
+    assertNotAborted(ctx.signal, this.id);
+    const source = this.#sourceFor(request.providerId);
+    const entry = await this.#load(source, ctx);
+    if (entry.widget.business?.allow_user_cancel === false) {
+      throw new PorterError("UNSUPPORTED_CAPABILITY", "That business does not allow cancelling from the booking page.");
+    }
+
+    const reservation = await this.#post<BuyerReservation>(
+      "/buyer/reservations/cancel",
+      { id: request.bookingRef, occurrence_date_start: null },
+      source.url,
+      ctx,
+      "cancel",
+    );
+
+    const startsAt = new Date(reservation.date_start ?? ctx.now.toISOString());
+    const policy = await this.getServiceCancellationPolicy(
+      { providerId: request.providerId, serviceId: "", startsAt },
+      ctx,
+    );
+    return {
+      id: reservation.id || request.bookingRef,
+      adapterId: this.id,
+      providerId: request.providerId,
+      locationId: request.providerId,
+      serviceId: "",
+      status: mapBuyerStatus(reservation.status, reservation.is_cancelled ?? true),
+      startsAt,
+      endsAt: new Date(reservation.date_end ?? startsAt.toISOString()),
+      cancellationPolicy: policy,
+      providerBookingRef: reservation.id || request.bookingRef,
+      createdAt: ctx.now,
+      updatedAt: ctx.now,
+    };
   }
 
   // --------------------------------------------------------------- internals
+
+  async #ready(
+    providerId: string,
+    ctx: AdapterContext,
+  ): Promise<{ source: SquarePublicSource; widget: SquareWidget; locationId: string } | null> {
+    const source = this.#sourceFor(providerId);
+    const entry = await this.#load(source, ctx);
+    const locationId = locationTokenFromUrl(source.url);
+    if (!locationId || !entry.widget.business_location_id) return null;
+    return { source, widget: entry.widget, locationId };
+  }
+
+  #matchService(
+    widget: SquareWidget,
+    serviceId: string,
+  ): { service: SquareWidgetService; variation: SquareWidgetVariation } | undefined {
+    const id = serviceId.split(":").pop();
+    if (!id) return undefined;
+    for (const service of widget.services ?? []) {
+      for (const variation of service.variations ?? []) {
+        if (variation.item_variation_token === id || variation.id === id) return { service, variation };
+      }
+      if (service.id === id) {
+        return {
+          service,
+          variation: {
+            id: service.item_variation_token ?? service.id,
+            name: service.name,
+            item_token: service.item_token,
+            item_version: service.item_version,
+            item_variation_token: service.item_variation_token ?? service.id,
+            item_variation_version: service.item_variation_version,
+            service_time: service.time,
+            transition_time: service.transition_time,
+            staff_ids: service.staff_ids,
+            price_cents: service.price_cents,
+            no_show_fee_cents: service.no_show_fee_cents,
+          },
+        };
+      }
+    }
+    return undefined;
+  }
+
+  async #searchSlots(
+    loaded: { source: SquarePublicSource; widget: SquareWidget; locationId: string },
+    match: { service: SquareWidgetService; variation: SquareWidgetVariation },
+    staffTokens: readonly string[],
+    from: Date,
+    to: Date,
+    ctx: AdapterContext,
+  ): Promise<Slot[]> {
+    if (to.getTime() <= from.getTime()) return [];
+    const variationId = match.variation.item_variation_token ?? match.variation.id;
+    const res = await this.#post<{ availability?: readonly BuyerAvailabilitySlot[] }>(
+      "/buyer/availability",
+      availabilityBody({ locationId: loaded.locationId, variationId, staffTokens, from, to }),
+      loaded.source.url,
+      ctx,
+      "availability",
+    );
+
+    const providerId = `${this.id}:${loaded.source.key}`;
+    const priced = this.#services(loaded.source, loaded.widget).find((s) => s.id.endsWith(`:${variationId}`));
+    const out: Slot[] = [];
+    for (const slot of res.availability ?? []) {
+      if (slot.available === false || !Number.isFinite(slot.start) || !Number.isFinite(slot.end)) continue;
+      const startsAt = new Date(slot.start * 1000);
+      if (startsAt < from || startsAt >= to) continue;
+      const employee = slot.segments?.find((s) => s.employee_token)?.employee_token ?? undefined;
+      out.push({
+        providerId,
+        locationId: providerId,
+        serviceId: priced?.id ?? `${providerId}:${variationId}`,
+        startsAt,
+        endsAt: new Date(slot.end * 1000),
+        fetchedAt: ctx.now,
+        ...(employee ? { providerSlotRef: employee } : {}),
+        ...(priced?.price ? { price: priced.price } : {}),
+      });
+    }
+    return out;
+  }
+
+  #bookingFrom(
+    providerId: string,
+    serviceId: string,
+    reservation: BuyerReservation,
+    price: Service["price"],
+    policy: CancellationPolicy,
+    ctx: AdapterContext,
+  ): Booking {
+    const startsAt = new Date(reservation.date_start ?? ctx.now.toISOString());
+    const endsAt = new Date(reservation.date_end ?? startsAt.toISOString());
+    return {
+      id: reservation.id,
+      adapterId: this.id,
+      providerId,
+      locationId: providerId,
+      serviceId,
+      status: mapBuyerStatus(reservation.status, reservation.is_cancelled),
+      startsAt,
+      endsAt,
+      cancellationPolicy: policy,
+      providerBookingRef: reservation.id,
+      createdAt: ctx.now,
+      updatedAt: ctx.now,
+      ...(price ? { price } : {}),
+    };
+  }
+
+  async #post<T>(path: string, body: unknown, referer: string, ctx: AdapterContext, step: "availability" | "hold" | "buyer" | "book" | "cancel"): Promise<T> {
+    assertNotAborted(ctx.signal, this.id);
+    let response;
+    try {
+      response = await this.#http.send({
+        method: "POST",
+        url: `${BUYER_API}${path}`,
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          origin: "https://book.squareup.com",
+          referer,
+        },
+        body,
+        signal: ctx.signal,
+      });
+    } catch (error) {
+      if (PorterError.is(error)) throw error;
+      throw new PorterError("ADAPTER_DOWN", "That booking page is not responding right now. Try again in a moment.", {
+        details: { adapter: this.id },
+        cause: error,
+      });
+    }
+
+    if (response.status === 429) {
+      throw new PorterError("RATE_LIMITED", "That booking page is asking us to slow down. Try again in a few minutes.", {
+        details: { adapter: this.id },
+        retryAfterSeconds: 60,
+      });
+    }
+    if (response.status === 422) {
+      if (step === "hold" || step === "book") {
+        throw new PorterError("SLOT_TAKEN", "That time has just been taken. Search again for another one.");
+      }
+      if (step === "buyer") {
+        throw new PorterError("INVALID_REQUEST", "That email or phone number was not accepted. Use a real email address.");
+      }
+      throw new PorterError("INVALID_REQUEST", "That appointment could not be changed.");
+    }
+    if (response.status >= 400 || response.body === null || typeof response.body !== "object") {
+      throw new PorterError(response.status >= 500 ? "ADAPTER_DOWN" : "PROVIDER_UNAVAILABLE", "That business's booking page is not reachable right now.", {
+        details: { adapter: this.id },
+      });
+    }
+    return response.body as T;
+  }
 
   #sourceFor(providerId: string): SquarePublicSource {
     const key = providerId.startsWith(`${this.id}:`) ? providerId.slice(this.id.length + 1) : providerId;

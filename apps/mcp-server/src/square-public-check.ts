@@ -121,8 +121,8 @@ ${yellow("That does not look like a Square booking page.")}
   }
 
   console.log(
-    `\n${dim("Booking is not automated here: Porter hands the user a link to this page.")}\n` +
-      `${dim("Connect the merchant's Square account to get live availability and real bookings.")}\n`,
+    `\n${dim("Porter books this page when the business does not collect a card.")}\n` +
+      `${dim("A deposit, a no-show hold, or a card on file is finished on the page itself.")}\n`,
   );
 }
 

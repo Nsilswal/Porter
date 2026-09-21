@@ -39,6 +39,10 @@ export interface SquareWidgetBusiness {
   readonly currency_code?: string;
   readonly timezone?: string;
   readonly country?: string;
+  /** "off" when the buyer pays at the visit. Anything else collects money now. */
+  readonly buyer_prepayment_mode?: string | null;
+  /** The page asks for a card before it will create the appointment. */
+  readonly require_cof_when_booking?: boolean;
   /** Seconds of notice required before a booking. */
   readonly cutoff_time?: number | null;
   /** How far ahead bookings are accepted, in seconds. */
@@ -61,6 +65,10 @@ export interface SquareWidgetVariation {
   readonly transition_time?: number | null;
   readonly staff_ids?: readonly string[];
   readonly is_visible_in_default_booking?: boolean;
+  readonly item_token?: string;
+  readonly item_version?: number;
+  readonly item_variation_version?: number;
+  readonly intermissions?: readonly { readonly start_offset?: number; readonly end_offset?: number }[];
 }
 
 export interface SquareWidgetService {
@@ -76,7 +84,11 @@ export interface SquareWidgetService {
   /** Seconds. */
   readonly time?: number | null;
   readonly staff_ids?: readonly string[];
+  readonly item_token?: string;
   readonly item_variation_token?: string;
+  readonly item_version?: number;
+  readonly item_variation_version?: number;
+  readonly transition_time?: number | null;
   readonly variations?: readonly SquareWidgetVariation[];
 }
 
@@ -86,6 +98,8 @@ export interface SquareWidgetStaff {
   readonly last_name?: string;
   readonly long_name?: string;
   readonly short_name?: string;
+  /** Square team member id. Availability and booking both key off this, not `id`. */
+  readonly employee_token?: string;
 }
 
 export interface SquareWidgetLocation {

@@ -78,15 +78,15 @@ export function buildAdapters(config: PorterConfig, log: Logger): AdapterRegistr
     }
   }
 
-  // Square's public booking pages. Reads what a merchant already publishes,
-  // so it covers businesses that have not connected an account. Read-only:
-  // booking hands the user a link to the business's own page.
+  // Square's public booking pages. Covers businesses that have not connected
+  // an account. Books through the page's buyer API when no card is required;
+  // a deposit or a card on file is finished on the business's own page.
   if (config.squarePublicSourcesPath) {
     try {
       const sources = JSON.parse(readFileSync(config.squarePublicSourcesPath, "utf8")) as SquarePublicSource[];
       if (sources.length > 0) {
         adapters.push(createSquarePublicAdapter({ http, sources }));
-        log.warn("square_public_adapter_enabled", { sources: sources.length, note: "read-only; booking escalates to the user" });
+        log.warn("square_public_adapter_enabled", { sources: sources.length, note: "books when no card is required; otherwise escalates to the user" });
       }
     } catch (error) {
       log.error("square_public_sources_unreadable", { path: config.squarePublicSourcesPath, cause: String(error) });

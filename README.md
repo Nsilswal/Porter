@@ -77,7 +77,7 @@ packages/
   adapters/square-appointments/  beauty and wellness, REST
   adapters/jobber/     home services, GraphQL
   adapters/web/        reads public booking pages; off by default
-  adapters/square-public/  reads Square's public booking pages; off by default
+  adapters/square-public/  Square's public booking pages; books when no card is required; off by default
   db/                  Drizzle schema, in-memory store
   payments-stripe/     Stripe Connect gateway
 apps/
@@ -109,7 +109,7 @@ docs/                  research, plan, compliance mapping, deploy notes
 | `square-appointments` | beauty, wellness | slots, confirmed immediately | no | no | yes, from the booking profile |
 | `jobber` | home services | arrival windows, business confirms later | no | yes | none published |
 | `web` | both | reads public pages; **writes go to the user** | no | no | none published |
-| `square-public` | beauty, wellness | reads Square's public pages; **writes go to the user** | no | no | **yes, per service** |
+| `square-public` | beauty, wellness | slots, confirmed immediately when no card is required | no | no | **yes, per service** |
 
 Square and Jobber are genuinely different products, and the difference is carried by capability flags rather than by branches in core:
 
@@ -141,9 +141,9 @@ Porter is built against the Muse Connector Terms and Policies, which are not mer
 
 **The web adapter reads, it does not write.** It covers businesses that aren't on a connected platform by reading their public page, and it is deliberately read-only. Reading a page wrongly returns a wrong price, which the confirmation step catches because the user sees it. *Booking* through a page wrongly books the wrong appointment, and there is no error to catch — it just happens. So writes hand the user a deep link to the business's own page, the same way a CAPTCHA or a bank's 3-D Secure prompt does. Porter never attempts to solve a CAPTCHA.
 
-**`square-public` is the interesting one.** Square's public booking pages carry the entire booking model in a single `<meta name="widget">` tag: the business, every service and variation with real prices and durations, staff, the location, the cancellation policy text, the no-show cutoff, and **per-variation no-show fees**. That last one is richer than the official Bookings API, which exposes only an account-level cancellation fee.
+**`square-public` reads the page and books through the same buyer API the page uses.** The `<meta name="widget">` tag carries the business, every service and variation with real prices and durations, staff, the location, the cancellation policy text, the no-show cutoff, and **per-variation no-show fees**. Open times come from `POST /buyer/availability`. Booking is a hold, a buyer, then `POST /buyer/reservations`, and it confirms immediately when the business does not collect a card.
 
-It needs no merchant account, which is the difference between covering businesses that signed up and businesses that exist. Verified against a live page: 40 services from one salon, with a real 24-hour cutoff and a $120 fee on the colour service.
+A deposit, a no-show hold, or a required card on file needs a payment nonce from Square's page, so those bookings hand the person that link. It needs no merchant account, which is the difference between covering businesses that signed up and businesses that exist. Verified against a live page and a live booking on a salon that does not take a card.
 
 Both are **off unless their source list is set**, and kept separate from the API adapters because the Muse Connector Policies name "violating robots.txt" as a prohibited practice. A Muse-facing deployment leaves it unset.
 

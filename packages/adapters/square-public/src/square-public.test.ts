@@ -1,16 +1,28 @@
 import { describe, expect, it } from "vitest";
 import { makeContext } from "@porter/adapter-contract";
 import { PorterError, sanitize } from "@porter/shared";
-import { createSquarePublicAdapter, decodeEntities, extractWidget, parsePriceDescription, secondsToMinutes } from "./index.js";
+import { createSquarePublicAdapter, decodeEntities, extractWidget, parsePriceDescription, reservationIdFor, secondsToMinutes } from "./index.js";
 import { FakeSquarePage, GREEN_ROOM, renderWidgetPage } from "./testing/fake-page.js";
 
 const URL_ = "https://book.squareup.com/appointments/site/location/LOC/services";
 const source = { key: "green-room", url: URL_, categories: ["beauty.haircut" as const] };
 
-function build(pages?: Record<string, { status?: number; html: string }>) {
-  const http = new FakeSquarePage({ pages: pages ?? { [URL_]: { html: renderWidgetPage() } } });
+function build(pages?: Record<string, { status?: number; html: string }>, buyer?: { openSlots?: boolean; slotTaken?: boolean }) {
+  const http = new FakeSquarePage({ pages: pages ?? { [URL_]: { html: renderWidgetPage() } }, ...buyer });
   return { http, adapter: createSquarePublicAdapter({ http, sources: [source] }) };
 }
+
+function bookableWidget(): Record<string, unknown> {
+  const widget = JSON.parse(JSON.stringify(GREEN_ROOM)) as { business: Record<string, unknown> };
+  widget.business.no_show_protection_enabled = false;
+  widget.business.deposits_enabled = false;
+  widget.business.require_cof_when_booking = false;
+  widget.business.buyer_prepayment_mode = "off";
+  widget.business.allow_user_cancel = true;
+  return widget;
+}
+
+const CUSTOMER = { givenName: "Porter", familyName: "Probe", email: "porter.probe@gmail.com", phone: "5555550100" };
 
 describe("widget extraction", () => {
   it("decodes entities without double-decoding an escaped ampersand", () => {
@@ -171,10 +183,10 @@ describe("what it will not do", () => {
     }
   });
 
-  it("collects no customer data, because it submits none", () => {
+  it("collects the name, email and phone the buyer API requires", () => {
     const { adapter } = build();
-    expect(adapter.capabilities.requiredCustomerFields).toEqual([]);
-    expect(adapter.capabilities.optionalCustomerFields).toEqual([]);
+    expect(adapter.capabilities.requiredCustomerFields).toEqual(["givenName", "familyName", "email", "phone"]);
+    expect(adapter.capabilities.optionalCustomerFields).toEqual(["notes"]);
   });
 
   it("reports a page whose shape changed instead of returning an empty business", async () => {
@@ -197,6 +209,132 @@ describe("what it will not do", () => {
       expect(e.code).toBe("HUMAN_ACTION_REQUIRED");
       expect(e.details.reason).toBe("captcha");
     }
+  });
+});
+
+describe("booking through the buyer API", () => {
+  it("returns the open times Square publishes, and no others", async () => {
+    const { adapter } = build({ [URL_]: { html: renderWidgetPage(bookableWidget()) } }, { openSlots: true });
+    const ctx = makeContext();
+    const [result] = await adapter.searchProviders({ categories: ["beauty.haircut"], limit: 5 }, ctx);
+    const service = result!.services.find((s) => s.price?.amount === 4500)!;
+    const from = new Date("2026-10-05T12:00:00.000Z");
+    const to = new Date("2026-10-06T12:00:00.000Z");
+
+    const slots = await adapter.getAvailability({ providerId: result!.provider.id, serviceId: service.id, from, to, limit: 5 }, ctx);
+
+    expect(slots).toHaveLength(1);
+    expect(slots[0]!.startsAt.toISOString()).toBe("2026-10-05T12:00:00.000Z");
+    expect(slots[0]!.providerSlotRef).toBe("AyDSwvqsidre8ijdZpuB");
+    expect(slots[0]!.price!.amount).toBe(4500);
+
+    const fresh = await adapter.checkSlot(
+      { providerId: result!.provider.id, serviceId: service.id, startsAt: slots[0]!.startsAt, providerSlotRef: slots[0]!.providerSlotRef },
+      ctx,
+    );
+    expect(fresh?.startsAt.toISOString()).toBe(slots[0]!.startsAt.toISOString());
+  });
+
+  it("books and cancels when the business does not collect a card", async () => {
+    const { adapter, http } = build({ [URL_]: { html: renderWidgetPage(bookableWidget()) } }, { openSlots: true });
+    const ctx = makeContext();
+    const [result] = await adapter.searchProviders({ categories: ["beauty.haircut"], limit: 5 }, ctx);
+    const service = result!.services.find((s) => s.price?.amount === 4500)!;
+    const slots = await adapter.getAvailability(
+      { providerId: result!.provider.id, serviceId: service.id, from: new Date("2026-10-05T12:00:00.000Z"), to: new Date("2026-10-06T12:00:00.000Z"), limit: 5 },
+      ctx,
+    );
+
+    const booking = await adapter.createBooking(
+      {
+        providerId: result!.provider.id,
+        locationId: result!.provider.locations[0]!.id,
+        serviceId: service.id,
+        startsAt: slots[0]!.startsAt,
+        endsAt: slots[0]!.endsAt,
+        providerSlotRef: slots[0]!.providerSlotRef,
+        customer: CUSTOMER,
+        idempotencyKey: "probe-1",
+      },
+      ctx,
+    );
+
+    expect(booking.status).toBe("confirmed");
+    expect(booking.providerBookingRef).toBe(reservationIdFor("probe-1"));
+    expect(booking.price!.amount).toBe(4500);
+    const reserved = http.bodies.find((b) => b && typeof b === "object" && "reserved_time_id" in b) as { id: string; client: { email: string } };
+    expect(reserved.id).toBe(reservationIdFor("probe-1"));
+    expect(reserved.client.email).toBe(CUSTOMER.email);
+
+    const cancelled = await adapter.cancelBooking(
+      { bookingRef: booking.providerBookingRef, providerId: result!.provider.id, idempotencyKey: "probe-1-cancel" },
+      ctx,
+    );
+    expect(cancelled.status).toBe("cancelled");
+  });
+
+  it("reports a taken time instead of booking it", async () => {
+    const { adapter } = build({ [URL_]: { html: renderWidgetPage(bookableWidget()) } }, { openSlots: true, slotTaken: true });
+    const ctx = makeContext();
+    const [result] = await adapter.searchProviders({ categories: ["beauty.haircut"], limit: 5 }, ctx);
+    const service = result!.services.find((s) => s.price?.amount === 4500)!;
+    const slots = await adapter.getAvailability(
+      { providerId: result!.provider.id, serviceId: service.id, from: new Date("2026-10-05T12:00:00.000Z"), to: new Date("2026-10-06T12:00:00.000Z"), limit: 5 },
+      ctx,
+    );
+
+    await expect(
+      adapter.createBooking(
+        {
+          providerId: result!.provider.id,
+          locationId: result!.provider.locations[0]!.id,
+          serviceId: service.id,
+          startsAt: slots[0]!.startsAt,
+          endsAt: slots[0]!.endsAt,
+          providerSlotRef: slots[0]!.providerSlotRef,
+          customer: CUSTOMER,
+          idempotencyKey: "probe-taken",
+        },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: "SLOT_TAKEN" });
+  });
+
+  it("rejects an email Square will not accept", async () => {
+    const { adapter } = build({ [URL_]: { html: renderWidgetPage(bookableWidget()) } }, { openSlots: true });
+    const ctx = makeContext();
+    const [result] = await adapter.searchProviders({ categories: ["beauty.haircut"], limit: 5 }, ctx);
+    const service = result!.services.find((s) => s.price?.amount === 4500)!;
+
+    await expect(
+      adapter.createBooking(
+        {
+          providerId: result!.provider.id,
+          locationId: result!.provider.locations[0]!.id,
+          serviceId: service.id,
+          startsAt: new Date("2026-10-05T13:00:00.000Z"),
+          endsAt: new Date("2026-10-05T13:45:00.000Z"),
+          customer: { ...CUSTOMER, email: "porter@example.com" },
+          idempotencyKey: "probe-email",
+        },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
+  it("says the slot is gone when a re-check finds nothing", async () => {
+    const { adapter, http } = build({ [URL_]: { html: renderWidgetPage(bookableWidget()) } }, { openSlots: true });
+    const ctx = makeContext();
+    const [result] = await adapter.searchProviders({ categories: ["beauty.haircut"], limit: 5 }, ctx);
+    const service = result!.services.find((s) => s.price?.amount === 4500)!;
+    const [slot] = await adapter.getAvailability(
+      { providerId: result!.provider.id, serviceId: service.id, from: new Date("2026-10-05T12:00:00.000Z"), to: new Date("2026-10-06T12:00:00.000Z"), limit: 1 },
+      ctx,
+    );
+    http.openSlots = false;
+
+    const fresh = await adapter.checkSlot({ providerId: result!.provider.id, serviceId: service.id, startsAt: slot!.startsAt, providerSlotRef: slot!.providerSlotRef }, ctx);
+    expect(fresh).toBeNull();
   });
 });
 
