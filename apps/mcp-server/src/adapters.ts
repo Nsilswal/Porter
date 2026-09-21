@@ -3,6 +3,8 @@ import type { ProviderAdapter } from "@porter/core";
 import { createMockAdapter } from "@porter/adapter-mock";
 import { createSquareAdapter } from "@porter/adapter-square-appointments";
 import { createJobberAdapter } from "@porter/adapter-jobber";
+import { createWebAdapter, type WebSource } from "@porter/adapter-web";
+import { readFileSync } from "node:fs";
 import type { PorterConfig } from "./config.js";
 
 export interface AdapterRegistry {
@@ -57,6 +59,22 @@ export function buildAdapters(config: PorterConfig, log: Logger): AdapterRegistr
     adapters.push(createJobberAdapter({ http }));
     credentials.jobber = { accessToken: config.jobberAccessToken };
     log.warn("jobber_adapter_enabled", {});
+  }
+
+  // Public-page reading, off unless a source list is given. It is deliberately
+  // separate from the API adapters: the Muse Connector Policies prohibit
+  // "violating robots.txt", so a Muse-facing deployment leaves this unset and
+  // the submission stays accurate to what actually ships.
+  if (config.webSourcesPath) {
+    try {
+      const sources = JSON.parse(readFileSync(config.webSourcesPath, "utf8")) as WebSource[];
+      if (sources.length > 0) {
+        adapters.push(createWebAdapter({ http, sources }));
+        log.warn("web_adapter_enabled", { sources: sources.length, note: "read-only; writes escalate to the user" });
+      }
+    } catch (error) {
+      log.error("web_sources_unreadable", { path: config.webSourcesPath, cause: String(error) });
+    }
   }
 
   if (adapters.length === 0) {

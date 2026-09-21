@@ -24,6 +24,14 @@ export const ERROR_CODES = [
   "IDEMPOTENCY_IN_FLIGHT",
   "UNSUPPORTED_CAPABILITY",
   "UNAUTHENTICATED",
+  /**
+   * The agent is blocked by something only a person can clear — a CAPTCHA, a
+   * login wall, a bot check. Carries a URL for the user to open.
+   *
+   * Porter never attempts to solve these. Auto-solving a CAPTCHA is an
+   * explicit prohibited practice; escalating to the human is not.
+   */
+  "HUMAN_ACTION_REQUIRED",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

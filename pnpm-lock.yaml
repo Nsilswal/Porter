@@ -35,6 +35,9 @@ importers:
       '@porter/adapter-square-appointments':
         specifier: workspace:*
         version: link:../../packages/adapters/square-appointments
+      '@porter/adapter-web':
+        specifier: workspace:*
+        version: link:../../packages/adapters/web
       '@porter/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -85,6 +88,18 @@ importers:
         version: link:../../shared
 
   packages/adapters/square-appointments:
+    dependencies:
+      '@porter/adapter-contract':
+        specifier: workspace:*
+        version: link:../contract
+      '@porter/core':
+        specifier: workspace:*
+        version: link:../../core
+      '@porter/shared':
+        specifier: workspace:*
+        version: link:../../shared
+
+  packages/adapters/web:
     dependencies:
       '@porter/adapter-contract':
         specifier: workspace:*

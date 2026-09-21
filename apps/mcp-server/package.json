@@ -14,6 +14,7 @@
     "zod": "^3.24.1",
     "@porter/adapter-square-appointments": "workspace:*",
     "@porter/adapter-jobber": "workspace:*",
-    "@porter/payments-stripe": "workspace:*"
+    "@porter/payments-stripe": "workspace:*",
+    "@porter/adapter-web": "workspace:*"
   }
 }

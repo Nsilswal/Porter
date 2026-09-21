@@ -19,6 +19,15 @@ export interface PorterConfig {
   readonly allowLiveStripe: boolean;
   readonly rateLimitPerUser: { capacity: number; refillPerSecond: number };
   readonly rateLimitPerAdapter: { capacity: number; refillPerSecond: number };
+  /**
+   * Public-page reading. Off unless a source list is configured.
+   *
+   * Kept separate from the API adapters on purpose: the Muse Connector
+   * Policies name "violating robots.txt" as a prohibited practice, so a
+   * Muse-facing deployment should leave this unset and the submission should
+   * describe whatever actually ships.
+   */
+  readonly webSourcesPath: string | undefined;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
@@ -65,5 +74,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
       capacity: Number(env.PORTER_RATE_ADAPTER_BURST ?? 120),
       refillPerSecond: Number(env.PORTER_RATE_ADAPTER_PER_SEC ?? 10),
     },
+    webSourcesPath: env.PORTER_WEB_SOURCES || undefined,
   };
 }

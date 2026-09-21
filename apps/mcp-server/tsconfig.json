@@ -34,6 +34,9 @@
     },
     {
       "path": "../../packages/payments-stripe"
+    },
+    {
+      "path": "../../packages/adapters/web"
     }
   ]
 }
