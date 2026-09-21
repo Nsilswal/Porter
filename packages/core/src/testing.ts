@@ -2,7 +2,7 @@ import { FixedClock, createLogger, silentLogger } from "@porter/shared";
 import { createMockAdapter, type MockAdapter } from "@porter/adapter-mock";
 import { createMemoryStore, type MemoryStore } from "@porter/db";
 import { BookingEngine } from "./engine.js";
-import { RecordingPaymentGateway } from "./payments.js";
+import { MemoryPayoutDirectory, RecordingPaymentGateway } from "./payments.js";
 import { RateLimiter } from "./ratelimit.js";
 import { createSigner } from "./tokens.js";
 import type { Actor } from "./engine.js";
@@ -17,15 +17,17 @@ export interface Harness {
   readonly store: MemoryStore;
   readonly clock: FixedClock;
   readonly payments: RecordingPaymentGateway;
+  readonly payouts: MemoryPayoutDirectory;
   readonly actor: Actor;
   readonly signal: AbortSignal;
 }
 
-export function createHarness(options: { now?: string; adapter?: MockAdapter; verbose?: boolean } = {}): Harness {
+export function createHarness(options: { now?: string; adapter?: MockAdapter; verbose?: boolean; noPaymentMethod?: boolean } = {}): Harness {
   const clock = new FixedClock(new Date(options.now ?? "2026-10-01T12:00:00.000Z"));
   const adapter = options.adapter ?? createMockAdapter({ seed: 42 });
   const store = createMemoryStore();
   const payments = new RecordingPaymentGateway();
+  const payouts = new MemoryPayoutDirectory();
 
   const engine = new BookingEngine({
     adapters: [adapter],
@@ -39,9 +41,21 @@ export function createHarness(options: { now?: string; adapter?: MockAdapter; ve
       defaultAdapter: { capacity: 10_000, refillPerSecond: 1000 },
     }),
     payments,
+    payouts,
   });
 
-  return { engine, adapter, store, clock, payments, actor: { id: "user_test" }, signal: new AbortController().signal };
+  const actor: Actor = { id: "user_test" };
+  if (!options.noPaymentMethod) {
+    // A saved payment method, the way a real user would have one. Porter
+    // stores references only; it never sees card details.
+    void store.paymentProfiles.put(actor.id, {
+      customerRef: "cus_test_1",
+      paymentMethodRef: "pm_test_1",
+      label: "Visa ending 4242",
+    });
+  }
+
+  return { engine, adapter, store, clock, payments, payouts, actor, signal: new AbortController().signal };
 }
 
 /** Search, take the first slot, and return everything needed to book it. */

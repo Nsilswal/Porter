@@ -324,10 +324,18 @@ The two platforms turned out to be shaped very differently, which made this a re
 
 Both adapters are wired into the MCP server but default to **off**, and Square defaults to the sandbox host.
 
-### Milestone 4 — Payments, confirmation flow, audit log
-Stripe Connect integration in test mode; deposits and full payments; `pay_or_deposit` wired to the confirmation envelope; audit log complete and queryable; cancellation fees computed from real provider policies; rate limiting live.
+### Milestone 4 — Payments, confirmation flow, audit log ✅ **complete**
+Stripe Connect gateway (`packages/payments-stripe`), deposits and balances, cancellation fees actually charged, deposits refunded when no fee is due, audit trail queryable at `GET /v1/audit`, rate limiting live with a separate per-adapter bucket.
 
-*Exit:* a paid booking with a deposit, confirmed by the user, fully audited, replay-safe under a repeated idempotency key.
+*Exit met:* a booking with a deposit, confirmed by the user, deposit charged, the whole flow audited with no personal data in the log, and a repeated idempotency key charging exactly once. Covered by `packages/core/src/payments.test.ts`.
+
+Three design decisions worth recording:
+
+- **Off-session is the default.** An agent-initiated payment has nobody at a checkout page, so `error_on_requires_action` is set and a bank challenge surfaces as a distinct error with an approval URL rather than a stuck payment.
+- **Gateway faults are not declines.** A bad key or a Stripe outage raises a system error; only genuine card errors are reported as payment failures. Telling a user to change a working card is worse than telling them to wait.
+- **Cancel first, then settle the money.** An uncollected fee is reported in `fee_uncollected` rather than blocking the cancellation the user confirmed.
+
+Stripe runs in **test mode only**. The server refuses to start with a live key unless `PORTER_ALLOW_LIVE_STRIPE=true`.
 
 ### Milestone 5 — Muse packaging and submission
 `submission/` with every form field filled (per research §4.3), a 512×512 PNG icon under 256 KiB, hosted API/MCP documentation, and a demo mode a Meta reviewer can exercise end to end. `legal/` with the privacy notice (§4.3(c)), a terms-of-service page drafted so it imposes nothing on users beyond Meta's terms (§10), and the 48-hour incident runbook (§4.3(b)).

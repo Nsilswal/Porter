@@ -1,5 +1,6 @@
 import type { Booking, BookingStatus } from "./domain.js";
 import type { CustomerField } from "./customer.js";
+import type { PaymentProfileStore, PaymentStore } from "./payments.js";
 
 /**
  * Storage ports.
@@ -25,6 +26,10 @@ export interface StoredBooking {
   readonly serviceName: string;
   readonly priceMinor: number | null;
   readonly currency: string | null;
+  /** What the business wants up front, when it wants one. */
+  readonly depositMinor: number | null;
+  /** How much of the price has actually been collected, in minor units. */
+  readonly paidMinor: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }
@@ -112,6 +117,8 @@ export interface Store {
   readonly confirmations: ConfirmationStore;
   readonly keys: KeyStore;
   readonly audit: AuditStore;
+  readonly payments: PaymentStore;
+  readonly paymentProfiles: PaymentProfileStore;
 }
 
 export type { Booking };

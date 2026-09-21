@@ -13,6 +13,12 @@ export interface PorterConfig {
   readonly squareAccessToken: string | undefined;
   readonly squareBaseUrl: string;
   readonly jobberAccessToken: string | undefined;
+  readonly stripeSecretKey: string | undefined;
+  readonly stripeApplicationFeeBps: number;
+  /** Refuse to start with live Stripe keys unless explicitly allowed. */
+  readonly allowLiveStripe: boolean;
+  readonly rateLimitPerUser: { capacity: number; refillPerSecond: number };
+  readonly rateLimitPerAdapter: { capacity: number; refillPerSecond: number };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
@@ -48,5 +54,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
     // Sandbox by default. Pointing at production is a deliberate act.
     squareBaseUrl: env.PORTER_SQUARE_BASE_URL ?? "https://connect.squareupsandbox.com",
     jobberAccessToken: env.PORTER_JOBBER_ACCESS_TOKEN || undefined,
+    stripeSecretKey: env.PORTER_STRIPE_SECRET_KEY || undefined,
+    stripeApplicationFeeBps: Number(env.PORTER_STRIPE_FEE_BPS ?? 0),
+    allowLiveStripe: env.PORTER_ALLOW_LIVE_STRIPE === "true",
+    rateLimitPerUser: {
+      capacity: Number(env.PORTER_RATE_USER_BURST ?? 60),
+      refillPerSecond: Number(env.PORTER_RATE_USER_PER_SEC ?? 2),
+    },
+    rateLimitPerAdapter: {
+      capacity: Number(env.PORTER_RATE_ADAPTER_BURST ?? 120),
+      refillPerSecond: Number(env.PORTER_RATE_ADAPTER_PER_SEC ?? 10),
+    },
   };
 }

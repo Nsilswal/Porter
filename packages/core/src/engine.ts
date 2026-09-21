@@ -39,7 +39,13 @@ import {
   type ProviderView,
   type SlotView,
 } from "./views.js";
-import type { PaymentGateway } from "./payments.js";
+import type {
+  ChargeFailureReason,
+  ChargeKind,
+  PaymentGateway,
+  PaymentRecord,
+  PayoutDirectory,
+} from "./payments.js";
 
 export interface Actor {
   /** Pseudonymous user id. Never an email or phone number. */
@@ -70,6 +76,8 @@ export interface EngineDeps {
   readonly signingSecret?: string;
   readonly limiter?: RateLimiter;
   readonly payments?: PaymentGateway;
+  /** Where each business's money goes. Absent means charge to Porter only. */
+  readonly payouts?: PayoutDirectory;
   readonly options?: EngineOptions;
   /** Per-adapter credentials, decrypted at the edge and scoped per call. */
   readonly credentials?: Readonly<Record<string, Readonly<Record<string, string>>>>;
@@ -135,8 +143,40 @@ export interface MessageArgs {
 }
 
 export type BookingResult = { readonly status: "ok"; readonly booking: BookingView };
-export type CancelResult = { readonly status: "ok"; readonly booking: BookingView; readonly fee_charged: { amount: number; currency: string } | null };
-export type PayResult = { readonly status: "ok"; readonly payment_id: string; readonly amount: { amount: number; currency: string }; readonly booking_id: string };
+export type CancelResult = {
+  readonly status: "ok";
+  readonly booking: BookingView;
+  readonly fee_charged: { amount: number; currency: string } | null;
+  readonly fee_uncollected: { amount: number; currency: string; reason: string | null } | null;
+};
+export type PayResult = {
+  readonly status: "ok";
+  readonly payment_id: string;
+  readonly kind: ChargeKind;
+  readonly amount: { amount: number; currency: string };
+  readonly amount_outstanding: number;
+  readonly booking_id: string;
+};
+
+export interface PaymentView {
+  readonly payment_id: string;
+  readonly kind: string;
+  readonly status: string;
+  readonly amount: { amount: number; currency: string };
+  readonly created_at: string;
+}
+
+export interface AuditView {
+  readonly at: string;
+  readonly tool: string;
+  readonly action: string;
+  readonly outcome: string;
+  readonly error_code: string | null;
+  readonly adapter: string | null;
+  readonly provider_id: string | null;
+  readonly disclosed_fields: readonly string[];
+  readonly latency_ms: number;
+}
 export type MaybeConfirm<T> = ConfirmationEnvelope | T;
 
 const DEFAULTS = {
@@ -164,6 +204,7 @@ export class BookingEngine {
   readonly #idem: Idempotency;
   readonly #audit: AuditLog;
   readonly #payments: PaymentGateway | undefined;
+  readonly #payouts: PayoutDirectory | undefined;
   readonly #credentials: Readonly<Record<string, Readonly<Record<string, string>>>>;
   readonly #opts: Required<EngineOptions>;
 
@@ -179,6 +220,7 @@ export class BookingEngine {
     this.#idem = new Idempotency(deps.store.idempotency, deps.store.keys, deps.clock);
     this.#audit = new AuditLog(deps.store.audit, deps.clock, deps.log);
     this.#payments = deps.payments;
+    this.#payouts = deps.payouts;
     this.#credentials = deps.credentials ?? {};
     this.#opts = {
       slotTtlMs: deps.options?.slotTtlMs ?? DEFAULTS.slotTtlMs,
@@ -439,6 +481,8 @@ export class BookingEngine {
         serviceName: sanitize(service?.name ?? "Appointment", { maxLength: 120, label: "service name" }),
         priceMinor: booking.price?.amount ?? null,
         currency: booking.price?.currency ?? null,
+        depositMinor: service?.depositRequired?.amount ?? booking.deposit?.amount ?? null,
+        paidMinor: 0,
         createdAt: booking.createdAt,
         updatedAt: booking.updatedAt,
       };
@@ -598,6 +642,44 @@ export class BookingEngine {
         this.#ctx(actor, adapter, signal),
       );
 
+      // Cancel first, then settle the money.
+      //
+      // The order matters. If the fee charge fails, the appointment is still
+      // cancelled — which is what the user asked for and confirmed — and the
+      // unpaid fee is a debt to chase, not a reason to leave them booked in.
+      // Doing it the other way round could take a fee and then fail to
+      // cancel, which is the worse failure by far.
+      let feeCharged: Money | null = null;
+      let feeError: string | null = null;
+      if (feeDue) {
+        try {
+          if (!this.#payments) throw new PorterError("UNSUPPORTED_CAPABILITY", "Fee collection is not switched on.");
+          await this.#charge(actor, stored, feeDue, "cancellation_fee", derivedKey(args.idempotency_key, "fee"));
+          feeCharged = feeDue;
+        } catch (error) {
+          feeError = PorterError.is(error) ? error.code : "ADAPTER_DOWN";
+          this.#log.warn("cancellation_fee_uncollected", { code: feeError, adapter: adapter.id });
+        }
+      }
+
+      // A deposit already paid is refunded when no fee is due.
+      if (!feeDue && stored.paidMinor > 0 && this.#payments) {
+        const paid = await this.#store.payments.listForBooking(actor.id, stored.id);
+        for (const record of paid.filter((r) => r.status === "succeeded" && r.kind !== "cancellation_fee")) {
+          try {
+            await this.#payments.refund({
+              paymentId: record.gatewayPaymentRef,
+              amount: { amount: record.amountMinor, currency: record.currency },
+              idempotencyKey: derivedKey(args.idempotency_key, `refund:${record.id}`),
+              reason: "requested_by_customer",
+            });
+            await this.#store.payments.put({ ...record, status: "refunded" });
+          } catch (error) {
+            this.#log.warn("refund_failed", { code: PorterError.is(error) ? error.code : "unknown" });
+          }
+        }
+      }
+
       const updated: StoredBooking = { ...stored, status: cancelled.status, updatedAt: cancelled.updatedAt };
       await this.#store.bookings.put(updated);
       await this.#audit.record({ actorId: actor.id, tool: "cancel_booking", action: "commit", adapterId: adapter.id, providerId: stored.providerId, args, idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started });
@@ -605,11 +687,22 @@ export class BookingEngine {
       return {
         status: "ok" as const,
         booking: bookingView(updated),
-        fee_charged: feeDue ? { amount: feeDue.amount, currency: feeDue.currency } : null,
+        fee_charged: feeCharged ? { amount: feeCharged.amount, currency: feeCharged.currency } : null,
+        // Stated plainly rather than hidden: the cancellation stood, but the
+        // business is still owed the fee.
+        fee_uncollected: feeDue && !feeCharged ? { amount: feeDue.amount, currency: feeDue.currency, reason: feeError } : null,
       };
     });
   }
 
+  /**
+   * Pay for a booking, or put down the deposit the business requires.
+   *
+   * Charges what is actually outstanding: the deposit first if one is owed
+   * and unpaid, otherwise the remaining balance. Two-phase like every other
+   * write, and the amount is bound into the confirmation token, so a price
+   * that moves between the summary and the commit voids the confirmation.
+   */
   async payOrDeposit(actor: Actor, args: PayArgs, signal: AbortSignal): Promise<MaybeConfirm<PayResult>> {
     const started = this.#clock.nowMs();
     const stored = await this.#requireBooking(actor, args.booking_id);
@@ -619,11 +712,14 @@ export class BookingEngine {
     if (!this.#payments) {
       throw new PorterError("UNSUPPORTED_CAPABILITY", "Paying through us is not switched on yet. The business will take payment directly.");
     }
-    if (stored.priceMinor === null || !stored.currency) {
-      throw new PorterError("PAYMENT_REQUIRED", "That booking has no amount to pay yet. Ask the business for a quote first.");
+    if (stored.status === "cancelled") {
+      throw new PorterError("POLICY_BLOCKED", "That booking was cancelled, so there is nothing to pay.");
     }
 
-    const amount = money(stored.priceMinor, stored.currency);
+    const due = outstanding(stored);
+    if (!due) {
+      throw new PorterError("PAYMENT_REQUIRED", "There is nothing left to pay on that booking.");
+    }
     const policy = await this.#policy(actor, adapter, stored, signal);
 
     if (!args.confirmation_token) {
@@ -636,14 +732,17 @@ export class BookingEngine {
           startsAt: stored.startsAt.toISOString(),
           durationMinutes: Math.round((stored.endsAt.getTime() - stored.startsAt.getTime()) / 60_000),
         },
-        moneyKind: "total",
-        total: amount,
-        breakdown: [{ label: stored.serviceName, amount }],
+        moneyKind: due.kind === "deposit" ? "deposit" : "total",
+        total: due.amount,
+        breakdown: [{ label: due.kind === "deposit" ? "Deposit" : stored.serviceName, amount: due.amount }],
         policy,
         providerId: stored.providerId,
         serviceId: stored.serviceId,
         startsAtMs: stored.startsAt.getTime(),
-        data: { booking_id: args.booking_id },
+        // A deposit is normally forfeited on a late cancellation, so the user
+        // is told before they commit, not after.
+        nonRefundable: due.kind === "deposit" && policy.known && policy.feeAmount !== null,
+        data: { booking_id: args.booking_id, kind: due.kind, amount: due.amount.amount },
       });
       await this.#audit.record({ actorId: actor.id, tool: "pay_or_deposit", action: "quote", adapterId: adapter.id, providerId: stored.providerId, args, outcome: "ok", startedAtMs: started });
       return envelope;
@@ -652,7 +751,11 @@ export class BookingEngine {
     const token = decodeConfirmationToken(this.#signer, args.confirmation_token, this.#clock);
     this.#assertToken(token, actor, "pay");
 
-    return this.#idem.run(actor.id, "pay_or_deposit", args.idempotency_key, { booking: args.booking_id, amount: amount.amount }, async () => {
+    // The idempotency payload is the caller's own arguments, never derived
+    // state. Hashing the outstanding amount would make a legitimate replay
+    // look like a conflict, because the first call changes that amount.
+    // The confirmation token already binds the price that was agreed.
+    return this.#idem.run(actor.id, "pay_or_deposit", args.idempotency_key, { booking: args.booking_id }, async () => {
       await this.#consume(token);
 
       const rederived = termsHash({
@@ -660,30 +763,71 @@ export class BookingEngine {
         providerId: stored.providerId,
         serviceId: stored.serviceId,
         startsAtMs: stored.startsAt.getTime(),
-        amountMinor: amount.amount,
-        currency: amount.currency,
+        amountMinor: due.amount.amount,
+        currency: due.amount.currency,
         feeMinor: policy.feeAmount?.amount ?? null,
-        nonRefundable: false,
+        nonRefundable: due.kind === "deposit" && policy.known && policy.feeAmount !== null,
         recurrence: { kind: "one_off" },
       });
       if (rederived !== token.terms) {
         throw new PorterError("CONFIRMATION_STALE", "The amount changed since we showed you the summary. Ask for a fresh summary and confirm again.");
       }
 
-      const result = await this.#payments!.charge({
-        userId: actor.id,
-        bookingId: stored.id,
-        amount,
-        kind: "total",
-        idempotencyKey: derivedKey(args.idempotency_key, "charge"),
-      });
-      if (result.status === "failed") {
-        throw new PorterError("PAYMENT_REQUIRED", "That payment did not go through. Try a different payment method.");
-      }
+      const result = await this.#charge(actor, stored, due.amount, due.kind, derivedKey(args.idempotency_key, "charge"));
+
+      const updated: StoredBooking = { ...stored, paidMinor: stored.paidMinor + due.amount.amount, updatedAt: this.#clock.now() };
+      await this.#store.bookings.put(updated);
 
       await this.#audit.record({ actorId: actor.id, tool: "pay_or_deposit", action: "commit", adapterId: adapter.id, providerId: stored.providerId, args, idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started });
-      return { status: "ok" as const, payment_id: result.paymentId, amount: { amount: amount.amount, currency: amount.currency }, booking_id: stored.id };
+
+      return {
+        status: "ok" as const,
+        payment_id: result.paymentId,
+        kind: due.kind,
+        amount: { amount: due.amount.amount, currency: due.amount.currency },
+        amount_outstanding: Math.max(0, (stored.priceMinor ?? 0) - updated.paidMinor),
+        booking_id: stored.id,
+      };
     });
+  }
+
+  /** What the user has actually paid, for display and for receipts. */
+  async listPayments(actor: Actor, bookingId: string): Promise<{ payments: PaymentView[] }> {
+    const rows = await this.#store.payments.listForBooking(actor.id, bookingId);
+    return {
+      payments: rows.map((r) => ({
+        payment_id: r.id,
+        kind: r.kind,
+        status: r.status,
+        amount: { amount: r.amountMinor, currency: r.currency },
+        created_at: r.createdAt.toISOString(),
+      })),
+    };
+  }
+
+  /**
+   * The user's own audit trail.
+   *
+   * Meta's help centre tells Muse users they can see "a complete audit trail
+   * of everything your agent has done". Porter has to be able to back that,
+   * and it can, from hashes and outcomes alone — the log holds no personal
+   * data. Terms 4.3(f) and 4.3(g).
+   */
+  async getAuditTrail(actor: Actor, limit = 100): Promise<{ entries: AuditView[] }> {
+    const rows = await this.#audit.list(actor.id, limit);
+    return {
+      entries: rows.map((r) => ({
+        at: r.at.toISOString(),
+        tool: r.tool,
+        action: r.action,
+        outcome: r.outcome,
+        error_code: r.errorCode,
+        adapter: r.adapterId,
+        provider_id: r.providerId,
+        disclosed_fields: [...r.disclosedFields],
+        latency_ms: r.latencyMs,
+      })),
+    };
   }
 
   async messageProvider(actor: Actor, args: MessageArgs, signal: AbortSignal): Promise<{ status: "ok"; delivered_at: string }> {
@@ -704,16 +848,77 @@ export class BookingEngine {
   }
 
   /** Terms 4.3(f): purge everything tied to a user on revocation or request. */
-  async deleteUserData(actor: Actor): Promise<{ bookings: number; idempotency: number }> {
+  async deleteUserData(actor: Actor): Promise<{ bookings: number; idempotency: number; payments: number }> {
     const bookings = await this.#store.bookings.deleteAllForUser(actor.id);
     const idempotency = await this.#store.idempotency.deleteAllForUser(actor.id);
+    const payments = await this.#store.payments.deleteAllForUser(actor.id);
+    await this.#store.paymentProfiles.deleteAllForUser(actor.id);
     // Destroying the per-user key renders any remaining ciphertext unreadable.
     await this.#store.keys.destroy(actor.id);
-    this.#log.info("user_data_deleted", { bookings, idempotency });
-    return { bookings, idempotency };
+    this.#log.info("user_data_deleted", { bookings, idempotency, payments });
+    return { bookings, idempotency, payments };
   }
 
   // --------------------------------------------------------------- internals
+
+  /**
+   * Run a charge through the gateway and record it.
+   *
+   * The failure paths matter more than the happy one. An agent-initiated
+   * payment is off-session: the user is not sitting at a checkout page, so if
+   * the bank demands 3-D Secure nobody can complete it on their behalf. That
+   * comes back as a distinct, explainable error rather than a generic decline.
+   */
+  async #charge(actor: Actor, stored: StoredBooking, amount: Money, kind: ChargeKind, idempotencyKey: string) {
+    const profile = await this.#store.paymentProfiles.get(actor.id);
+    if (!profile) {
+      throw new PorterError("PAYMENT_REQUIRED", "There is no payment method saved. Add one, then try again.", {
+        details: { reason: "no_payment_method" },
+      });
+    }
+
+    const destination = (await this.#payouts?.lookup(stored.adapterId, stored.providerId)) ?? undefined;
+
+    const result = await this.#payments!.charge({
+      userId: actor.id,
+      bookingId: stored.id,
+      amount,
+      kind,
+      idempotencyKey,
+      customerRef: profile.customerRef,
+      paymentMethodRef: profile.paymentMethodRef,
+      description: `${kind === "cancellation_fee" ? "Cancellation fee" : stored.serviceName} — ${stored.providerName}`,
+      // Only non-identifying references. No customer details reach the
+      // gateway's metadata, which is readable by anyone with dashboard access.
+      metadata: { booking_id: stored.id, adapter: stored.adapterId, kind },
+      ...(destination ? { destinationAccountRef: destination } : {}),
+    });
+
+    await this.#store.payments.put({
+      id: newId("pay"),
+      userId: actor.id,
+      bookingId: stored.id,
+      gatewayId: this.#payments!.id,
+      gatewayPaymentRef: result.paymentId,
+      amountMinor: amount.amount,
+      currency: amount.currency,
+      kind,
+      status: result.status,
+      createdAt: this.#clock.now(),
+    } satisfies PaymentRecord);
+
+    if (result.status === "requires_action") {
+      throw new PorterError("PAYMENT_REQUIRED", "The bank needs the cardholder to approve this payment. Ask the user to confirm it with their bank, then try again.", {
+        details: { reason: "authentication_required", ...(result.actionUrl ? { approval_url: result.actionUrl } : {}) },
+      });
+    }
+    if (result.status === "failed") {
+      throw new PorterError("PAYMENT_REQUIRED", explainFailure(result.reason), {
+        details: { reason: result.reason ?? "gateway_error" },
+      });
+    }
+    return result;
+  }
 
   #ctx(actor: Actor, adapter: ProviderAdapter, signal: AbortSignal): AdapterContext {
     return {
@@ -910,6 +1115,33 @@ function assertValidRange(from: Date, to: Date): void {
   }
   if (to.getTime() <= from.getTime()) {
     throw new PorterError("INVALID_REQUEST", "The end of the date range must be after the start.");
+  }
+}
+
+/** What is still owed on a booking, and whether it is a deposit or the balance. */
+export function outstanding(booking: StoredBooking): { kind: ChargeKind; amount: Money } | null {
+  if (booking.priceMinor === null || !booking.currency) return null;
+  const currency = booking.currency;
+
+  if (booking.depositMinor !== null && booking.paidMinor < booking.depositMinor) {
+    return { kind: "deposit", amount: money(booking.depositMinor - booking.paidMinor, currency) };
+  }
+  const remaining = booking.priceMinor - booking.paidMinor;
+  return remaining > 0 ? { kind: "total", amount: money(remaining, currency) } : null;
+}
+
+function explainFailure(reason: ChargeFailureReason | undefined): string {
+  switch (reason) {
+    case "insufficient_funds":
+      return "That card does not have enough funds. Try a different payment method.";
+    case "expired_card":
+      return "That card has expired. Add a new payment method and try again.";
+    case "card_declined":
+      return "The card was declined. Try a different payment method.";
+    case "no_payment_method":
+      return "There is no payment method saved. Add one, then try again.";
+    default:
+      return "That payment did not go through. Try again, or use a different payment method.";
   }
 }
 

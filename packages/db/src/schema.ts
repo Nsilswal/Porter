@@ -71,6 +71,9 @@ export const bookings = pgTable(
     serviceName: text("service_name").notNull(),
     priceMinor: integer("price_minor"),
     currency: text("currency"),
+    depositMinor: integer("deposit_minor"),
+    /** Collected so far, in minor units. Drives what pay_or_deposit charges. */
+    paidMinor: integer("paid_minor").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -80,17 +83,51 @@ export const bookings = pgTable(
   }),
 );
 
-export const payments = pgTable("payments", {
-  id: text("id").primaryKey(),
-  bookingId: text("booking_id").notNull().references(() => bookings.id, { onDelete: "cascade" }),
-  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  amountMinor: integer("amount_minor").notNull(),
-  currency: text("currency").notNull(),
-  kind: text("kind").notNull(),
-  status: text("status").notNull(),
-  gatewayId: text("gateway_id"),
+export const payments = pgTable(
+  "payments",
+  {
+    id: text("id").primaryKey(),
+    bookingId: text("booking_id").notNull().references(() => bookings.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    amountMinor: integer("amount_minor").notNull(),
+    currency: text("currency").notNull(),
+    kind: text("kind").notNull(), // deposit | total | cancellation_fee
+    status: text("status").notNull(),
+    gatewayId: text("gateway_id").notNull(),
+    /** The gateway's own id, e.g. a Stripe PaymentIntent. Not card data. */
+    gatewayPaymentRef: text("gateway_payment_ref").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ byBooking: index("payments_booking_idx").on(t.userId, t.bookingId) }),
+);
+
+/**
+ * The user's saved payment details.
+ *
+ * References only. Porter never stores a card number, and never enters one:
+ * the user saves a method with the gateway directly and Porter keeps the
+ * opaque ids. Deleted with the user under Connector Terms 4.3(f).
+ */
+export const paymentProfiles = pgTable("payment_profiles", {
+  userId: text("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  customerRef: text("customer_ref").notNull(),
+  paymentMethodRef: text("payment_method_ref").notNull(),
+  /** Display only, e.g. "Visa ending 4242". */
+  label: text("label").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Where each business's money goes, once it is onboarded to Connect. */
+export const payoutAccounts = pgTable(
+  "payout_accounts",
+  {
+    adapterId: text("adapter_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    accountRef: text("account_ref").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.adapterId, t.providerId] }) }),
+);
 
 export const idempotencyKeys = pgTable(
   "idempotency_keys",

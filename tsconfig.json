@@ -20,6 +20,9 @@
       "path": "packages/adapters/jobber"
     },
     {
+      "path": "packages/payments-stripe"
+    },
+    {
       "path": "packages/db"
     },
     {

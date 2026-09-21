@@ -6,7 +6,7 @@ Porter does not onboard businesses one at a time. It integrates with the booking
 
 Targets Meta Muse first, and serves Claude and ChatGPT from the same MCP server.
 
-**Status: milestone 3 complete.** Core, mock adapter and MCP server work end to end locally. Square Appointments and Jobber adapters are built and pass the conformance suite. Stripe payments are milestone 4.
+**Status: milestone 4 complete.** Core, mock adapter and MCP server work end to end locally. Square Appointments and Jobber adapters pass the conformance suite. Stripe payments, cancellation fees, the audit trail and rate limiting are live. Muse packaging is milestone 5.
 
 > **Neither remote adapter may be pointed at a real account yet.** Both are tested against wire-level fakes built from published documentation, not recorded sandbox traffic, and the upstream rights question in `docs/plan.md` section 9 item 7 is unresolved. See [Provider adapters](#provider-adapters).
 
@@ -50,6 +50,7 @@ packages/
   adapters/square-appointments/  beauty and wellness, REST
   adapters/jobber/     home services, GraphQL
   db/                  Drizzle schema, in-memory store
+  payments-stripe/     Stripe Connect gateway
 apps/
   mcp-server/          remote MCP over Streamable HTTP + OAuth 2.1
 docs/                  research, plan, and a local copy of the Connector Terms
@@ -107,13 +108,21 @@ Porter is built against the Muse Connector Terms and Policies, which are not mer
 
 **Porter never scrapes.** API only, always.
 
+**Money moves only after a confirmed summary.** Porter charges through its own Stripe account using Connect destination charges, so the business gets its share immediately. Three things matter in the detail:
+
+- **Agent payments are off-session.** Nobody is at a checkout page, so if the bank demands 3-D Secure nobody can answer it. That comes back as a distinct `authentication_required` error with somewhere to send the user, not a generic decline.
+- **A card decline and a Stripe outage are different problems.** A decline is the cardholder's to fix; a bad API key or an outage is ours. Reporting the second as the first would send the user to change a card that is fine.
+- **Cancel first, then settle.** If a cancellation fee cannot be collected, the appointment is still cancelled — that is what the user confirmed — and the uncollected fee is reported plainly rather than hidden. Taking a fee and then failing to cancel would be the worse failure.
+
+Porter never stores or enters card details. It keeps opaque gateway references, and nothing personal is sent in payment metadata.
+
 ## Testing
 
 ```bash
 pnpm test
 ```
 
-137 tests: unit, adapter conformance, prompt injection, compliance, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
+178 tests: unit, adapter conformance, prompt injection, compliance, payments, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
 
 Any new adapter must pass the conformance suite in `packages/adapters/contract` unchanged. That is what makes "add a platform without touching core" a real claim.
 

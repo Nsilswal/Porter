@@ -301,3 +301,113 @@ describe("hostile provider content over the wire", () => {
     await client.close();
   });
 });
+
+describe("payments and audit over the wire", () => {
+  it("runs the full money path through the MCP server", async () => {
+    const client = await connect();
+
+    // Find something with a deposit.
+    const search = parse(await client.callTool({ name: "search_providers", arguments: { category: "massage", limit: 5 } }));
+    const provider = search.providers.find((p: any) => p.services.some((s: any) => s.deposit_required));
+    const service = provider.services.find((s: any) => s.deposit_required);
+
+    const from = new Date(Date.now() + 2 * 60 * 60_000).toISOString();
+    const to = new Date(Date.now() + 14 * 24 * 60 * 60_000).toISOString();
+    const avail = parse(await client.callTool({ name: "get_availability", arguments: { provider_id: provider.provider_id, service_id: service.service_id, from, to, limit: 5 } }));
+
+    const bookSummary = parse(await client.callTool({
+      name: "create_booking",
+      arguments: { slot_id: avail.slots[0].slot_id, customer_details: { givenName: "Pat", phone: "555-0199" }, idempotency_key: "pay-e2e-1" },
+    }));
+    const booked = parse(await client.callTool({
+      name: "create_booking",
+      arguments: { slot_id: avail.slots[0].slot_id, customer_details: { givenName: "Pat", phone: "555-0199" }, idempotency_key: "pay-e2e-1", confirmation_token: bookSummary.confirmationToken },
+    }));
+    const bookingId = booked.booking.booking_id;
+
+    // Without a saved payment method the agent is told exactly what is wrong.
+    const noMethod: any = await client.callTool({ name: "pay_or_deposit", arguments: { booking_id: bookingId, idempotency_key: "pay-e2e-2" } });
+    const noMethodSummary = parse(noMethod);
+    expect(noMethodSummary.status).toBe("confirmation_required");
+
+    const attempt: any = await client.callTool({
+      name: "pay_or_deposit",
+      arguments: { booking_id: bookingId, idempotency_key: "pay-e2e-2", confirmation_token: noMethodSummary.confirmationToken },
+    });
+    expect(attempt.isError).toBe(true);
+    expect(parse(attempt).error.details.reason).toBe("no_payment_method");
+
+    // Save one the way a real user would, then pay.
+    await app.store.paymentProfiles.put("user_integration", {
+      customerRef: "cus_it_1",
+      paymentMethodRef: "pm_it_1",
+      label: "Visa ending 4242",
+    });
+
+    const paySummary = parse(await client.callTool({ name: "pay_or_deposit", arguments: { booking_id: bookingId, idempotency_key: "pay-e2e-3" } }));
+    expect(paySummary.money.kind).toBe("deposit");
+    const paid = parse(await client.callTool({
+      name: "pay_or_deposit",
+      arguments: { booking_id: bookingId, idempotency_key: "pay-e2e-3", confirmation_token: paySummary.confirmationToken },
+    }));
+    expect(paid.status).toBe("ok");
+    expect(paid.kind).toBe("deposit");
+    expect(paid.amount_outstanding).toBeGreaterThan(0);
+
+    await client.close();
+  });
+
+  it("serves the user's audit trail without any personal data", async () => {
+    const res = await fetch(`${baseUrl}/v1/audit?limit=50`, { headers: { Authorization: `Bearer ${API_KEY}` } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Array.isArray(body.entries)).toBe(true);
+    expect(body.entries.length).toBeGreaterThan(0);
+
+    const serialised = JSON.stringify(body.entries);
+    expect(serialised).not.toContain("555-0199");
+    expect(serialised).not.toContain("sam@example.com");
+    // Field names are recorded so a Meta audit can see what was disclosed.
+    expect(serialised).toContain("disclosed_fields");
+  });
+
+  it("requires authentication for the audit trail", async () => {
+    const res = await fetch(`${baseUrl}/v1/audit`);
+    expect(res.status).toBe(401);
+  });
+});
+
+describe("rate limiting", () => {
+  it("refuses a runaway agent with a retry hint it can explain", async () => {
+    const limited = createApp({
+      port: 0,
+      apiKeys: { "rl-key": "user_rl" },
+      signingSecret: "rate-limit-signing-secret-long-enough-01",
+      logLevel: "error",
+      rateLimitPerUser: { capacity: 3, refillPerSecond: 0.1 },
+    });
+    const port = await limited.listen(0);
+    const client = new Client({ name: "rl", version: "1.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), {
+        requestInit: { headers: { Authorization: "Bearer rl-key" } },
+      }),
+    );
+
+    let limitedResult: any = null;
+    for (let i = 0; i < 8; i++) {
+      const result: any = await client.callTool({ name: "list_my_bookings", arguments: {} });
+      if (result.isError) {
+        limitedResult = parse(result);
+        break;
+      }
+    }
+
+    expect(limitedResult).not.toBeNull();
+    expect(limitedResult.error.code).toBe("RATE_LIMITED");
+    expect(limitedResult.error.retryAfterSeconds).toBeGreaterThan(0);
+
+    await client.close();
+    await limited.close();
+  });
+});

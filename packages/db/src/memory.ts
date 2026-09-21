@@ -11,6 +11,7 @@ import type {
   StoredBooking,
 } from "@porter/core";
 import type { BookingStatus } from "@porter/core";
+import { MemoryPaymentProfileStore, MemoryPaymentStore } from "@porter/core";
 
 /**
  * In-memory store.
@@ -143,16 +144,22 @@ class MemoryAuditStore implements AuditStore {
 
 export interface MemoryStore extends Store {
   readonly auditRows: AuditRecord[];
+  readonly payments: MemoryPaymentStore;
+  readonly paymentProfiles: MemoryPaymentProfileStore;
 }
 
 export function createMemoryStore(): MemoryStore {
   const audit = new MemoryAuditStore();
+  const payments = new MemoryPaymentStore();
+  const paymentProfiles = new MemoryPaymentProfileStore();
   return {
     bookings: new MemoryBookingStore(),
     idempotency: new MemoryIdempotencyStore(),
     confirmations: new MemoryConfirmationStore(),
     keys: new MemoryKeyStore(),
     audit,
+    payments,
+    paymentProfiles,
     get auditRows() {
       return audit.rows;
     },

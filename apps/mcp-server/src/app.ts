@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { BookingEngine, RateLimiter, RecordingPaymentGateway, createSigner, type Actor } from "@porter/core";
+import { BookingEngine, MemoryPayoutDirectory, RateLimiter, RecordingPaymentGateway, createSigner, type Actor, type PaymentGateway } from "@porter/core";
+import { createStripeGateway } from "@porter/payments-stripe";
+import { createFetchHttpClient } from "@porter/shared";
 import { createMemoryStore, type MemoryStore } from "@porter/db";
 import { buildAdapters } from "./adapters.js";
 import { createLogger, systemClock, type Logger } from "@porter/shared";
@@ -10,6 +12,8 @@ import { loadConfig, type PorterConfig } from "./config.js";
 export interface PorterApp {
   readonly server: Server;
   readonly engine: BookingEngine;
+  readonly payments: PaymentGateway;
+  readonly payouts: MemoryPayoutDirectory;
   readonly auth: AuthServer;
   readonly store: MemoryStore;
   readonly config: PorterConfig;
@@ -39,6 +43,9 @@ export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
   const store = createMemoryStore();
   const { adapters, credentials } = buildAdapters(config, log);
 
+  const payments = buildPaymentGateway(config, log);
+  const payouts = new MemoryPayoutDirectory();
+
   const engine = new BookingEngine({
     adapters,
     credentials,
@@ -46,12 +53,19 @@ export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
     clock: systemClock,
     log,
     signer: createSigner(config.signingSecret),
+    // Two independent buckets. The per-adapter one protects Porter's standing
+    // with each platform: exceeding a published quota risks API access for
+    // every Porter user, not just the one making the requests.
     limiter: new RateLimiter(systemClock, {
-      perUser: { capacity: 60, refillPerSecond: 2 },
-      perAdapter: {},
-      defaultAdapter: { capacity: 120, refillPerSecond: 10 },
+      perUser: config.rateLimitPerUser,
+      perAdapter: {
+        // Jobber throttles on a points budget, so Porter stays well under it.
+        jobber: { capacity: 40, refillPerSecond: 3 },
+      },
+      defaultAdapter: config.rateLimitPerAdapter,
     }),
-    payments: new RecordingPaymentGateway(),
+    payments,
+    payouts,
   });
 
   const auth = new AuthServer({
@@ -70,6 +84,8 @@ export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
   return {
     server,
     engine,
+    payments,
+    payouts,
     auth,
     store,
     config,
@@ -169,6 +185,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
     }
   }
 
+  // The user's own audit trail. Meta tells Muse users they can see a
+  // complete record of what their agent did, and Porter can back that — from
+  // hashes and outcomes alone, because the log holds no personal data.
+  if (path === "/v1/audit" && req.method === "GET") {
+    const ctx = deps.auth.authenticate(req.headers.authorization);
+    if (!ctx) {
+      res.writeHead(401, { "WWW-Authenticate": deps.auth.challengeHeader(), "Content-Type": "application/json" });
+      return void res.end(JSON.stringify({ error: "unauthorized" }));
+    }
+    const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 500);
+    return sendJson(res, 200, await deps.engine.getAuditTrail({ id: ctx.userId }, limit));
+  }
+
   if (path === "/mcp") {
     const ctx = deps.auth.authenticate(req.headers.authorization);
     if (!ctx) {
@@ -224,4 +253,29 @@ async function readForm(req: IncomingMessage): Promise<URLSearchParams> {
     return new URLSearchParams(Object.entries(obj));
   }
   return new URLSearchParams(raw);
+}
+
+/**
+ * Choose a payment gateway.
+ *
+ * Stripe only when a key is configured, and it will not start with live keys
+ * unless someone has explicitly said so. Milestone 4 is test mode: the plan
+ * commits to sandbox and test credentials only.
+ */
+function buildPaymentGateway(config: PorterConfig, log: Logger): PaymentGateway {
+  if (!config.stripeSecretKey) return new RecordingPaymentGateway();
+
+  const gateway = createStripeGateway({
+    http: createFetchHttpClient(),
+    secretKey: config.stripeSecretKey,
+    applicationFeeBps: config.stripeApplicationFeeBps,
+  });
+
+  if (!gateway.isTestMode && !config.allowLiveStripe) {
+    throw new Error(
+      "Refusing to start with a live Stripe key. Set PORTER_ALLOW_LIVE_STRIPE=true only when you intend to move real money.",
+    );
+  }
+  log.warn("stripe_gateway_enabled", { testMode: gateway.isTestMode, feeBps: config.stripeApplicationFeeBps });
+  return gateway;
 }
