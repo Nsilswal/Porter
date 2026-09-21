@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/core" },
+    { "path": "packages/adapters/contract" },
+    { "path": "packages/adapters/mock" },
+    { "path": "packages/db" },
+    { "path": "apps/mcp-server" }
+  ]
+}

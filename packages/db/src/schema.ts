@@ -1,0 +1,160 @@
+import {
+  bigserial,
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+  uniqueIndex,
+} from "drizzle-orm/pg-core";
+
+/**
+ * Postgres schema (Railway Postgres, via Drizzle).
+ *
+ * Two things in here are compliance decisions, not modelling preferences:
+ *
+ *  - `auditLog` stores an argument HASH and a list of disclosed field NAMES.
+ *    It holds no personal data, so it survives a deletion request under
+ *    Connector Terms 4.3(f) while still satisfying the records duty in 4.3(g).
+ *
+ *  - `idempotencyKeys.responseCipher` is encrypted under a per-user key held
+ *    in `userKeys`. Deleting that key renders every stored response
+ *    inaccessible, which is the "delete or render inaccessible" wording of
+ *    4.3(f) without having to rewrite history.
+ */
+
+export const users = pgTable("users", {
+  id: text("id").primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+});
+
+/** Per-user data encryption keys. Destroying a row is the delete mechanism. */
+export const userKeys = pgTable("user_keys", {
+  userId: text("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  key: text("key").notNull(), // base64url, wrapped by the KMS master key in production
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Adapter credentials, encrypted at rest, decrypted only into AdapterContext. */
+export const linkedAccounts = pgTable(
+  "linked_accounts",
+  {
+    userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    adapterId: text("adapter_id").notNull(),
+    credentialCipher: text("credential_cipher").notNull(),
+    scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.userId, t.adapterId] }) }),
+);
+
+export const bookings = pgTable(
+  "bookings",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    adapterId: text("adapter_id").notNull(),
+    providerBookingRef: text("provider_booking_ref").notNull(),
+    status: text("status").notNull(),
+    startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+    endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
+    providerId: text("provider_id").notNull(),
+    locationId: text("location_id").notNull(),
+    serviceId: text("service_id").notNull(),
+    // Already sanitised display copy, cached so list_my_bookings stays cheap.
+    providerName: text("provider_name").notNull(),
+    serviceName: text("service_name").notNull(),
+    priceMinor: integer("price_minor"),
+    currency: text("currency"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    byUser: index("bookings_user_starts_idx").on(t.userId, t.startsAt),
+    byRef: uniqueIndex("bookings_adapter_ref_idx").on(t.adapterId, t.providerBookingRef),
+  }),
+);
+
+export const payments = pgTable("payments", {
+  id: text("id").primaryKey(),
+  bookingId: text("booking_id").notNull().references(() => bookings.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  amountMinor: integer("amount_minor").notNull(),
+  currency: text("currency").notNull(),
+  kind: text("kind").notNull(),
+  status: text("status").notNull(),
+  gatewayId: text("gateway_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const idempotencyKeys = pgTable(
+  "idempotency_keys",
+  {
+    userId: text("user_id").notNull(),
+    tool: text("tool").notNull(),
+    key: text("key").notNull(),
+    /** Hash only. The request payload itself is never stored. */
+    argsHash: text("args_hash").notNull(),
+    state: text("state").notNull(),
+    responseCipher: text("response_cipher"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.userId, t.tool, t.key] }),
+    byExpiry: index("idempotency_expires_idx").on(t.expiresAt),
+  }),
+);
+
+/** Spent confirmation tokens. A row means "already used". */
+export const confirmationTokens = pgTable(
+  "confirmation_tokens",
+  {
+    jti: text("jti").primaryKey(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => ({ byExpiry: index("confirmation_expires_idx").on(t.expiresAt) }),
+);
+
+/**
+ * Append-only audit log. No personal data. See the note at the top of this file.
+ */
+export const auditLog = pgTable(
+  "audit_log",
+  {
+    seq: bigserial("seq", { mode: "number" }).primaryKey(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    actorId: text("actor_id").notNull(),
+    tool: text("tool").notNull(),
+    action: text("action").notNull(),
+    adapterId: text("adapter_id"),
+    providerId: text("provider_id"),
+    argsHash: text("args_hash").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    confirmationJti: text("confirmation_jti"),
+    outcome: text("outcome").notNull(),
+    errorCode: text("error_code"),
+    latencyMs: integer("latency_ms").notNull(),
+    /** Customer field NAMES disclosed downstream. Never values. */
+    disclosedFields: jsonb("disclosed_fields").$type<string[]>().notNull().default([]),
+    immutable: boolean("immutable").notNull().default(true),
+  },
+  (t) => ({ byActor: index("audit_actor_at_idx").on(t.actorId, t.at) }),
+);
+
+export const providersCache = pgTable(
+  "providers_cache",
+  {
+    adapterId: text("adapter_id").notNull(),
+    providerId: text("provider_id").notNull(),
+    payload: jsonb("payload").notNull(),
+    fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.adapterId, t.providerId] }) }),
+);

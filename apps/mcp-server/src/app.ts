@@ -1,0 +1,229 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { BookingEngine, RateLimiter, RecordingPaymentGateway, createSigner, type Actor } from "@porter/core";
+import { createMemoryStore, type MemoryStore } from "@porter/db";
+import { createMockAdapter } from "@porter/adapter-mock";
+import { createLogger, systemClock, type Logger } from "@porter/shared";
+import { AuthServer, SCOPES } from "./auth.js";
+import { buildMcpServer, createTransport } from "./server.js";
+import { loadConfig, type PorterConfig } from "./config.js";
+
+export interface PorterApp {
+  readonly server: Server;
+  readonly engine: BookingEngine;
+  readonly auth: AuthServer;
+  readonly store: MemoryStore;
+  readonly config: PorterConfig;
+  listen(port?: number): Promise<number>;
+  close(): Promise<void>;
+}
+
+/**
+ * The HTTP surface.
+ *
+ *   POST /mcp                                     the MCP endpoint
+ *   GET  /.well-known/oauth-protected-resource    RFC 9728
+ *   GET  /.well-known/oauth-authorization-server  RFC 8414
+ *   POST /oauth/register                          dynamic client registration
+ *   GET  /oauth/authorize                         consent, issues a code
+ *   POST /oauth/token                             PKCE exchange and refresh
+ *   GET  /healthz                                 liveness, for Railway
+ *
+ * An unauthenticated call to /mcp returns 401 with a WWW-Authenticate header
+ * pointing at the protected-resource metadata. That challenge is what lets an
+ * MCP client discover how to authenticate without being told out of band.
+ */
+export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
+  const config = { ...loadConfig(), ...overrides };
+  const log: Logger = createLogger({ level: config.logLevel, base: { app: "porter-mcp" } });
+
+  const store = createMemoryStore();
+  const adapter = createMockAdapter({
+    latencyMs: config.adapterLatencyMs,
+    failureRate: config.adapterFailureRate,
+  });
+
+  const engine = new BookingEngine({
+    adapters: [adapter],
+    store,
+    clock: systemClock,
+    log,
+    signer: createSigner(config.signingSecret),
+    limiter: new RateLimiter(systemClock, {
+      perUser: { capacity: 60, refillPerSecond: 2 },
+      perAdapter: {},
+      defaultAdapter: { capacity: 120, refillPerSecond: 10 },
+    }),
+    payments: new RecordingPaymentGateway(),
+  });
+
+  const auth = new AuthServer({
+    issuer: config.issuer,
+    resource: `${config.issuer}/mcp`,
+    apiKeys: config.apiKeys,
+  });
+
+  const server = createServer((req, res) => {
+    handle(req, res, { engine, auth, log, config }).catch((error: unknown) => {
+      log.error("request_failed", { cause: String(error) });
+      if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+    });
+  });
+
+  return {
+    server,
+    engine,
+    auth,
+    store,
+    config,
+    listen(port = config.port) {
+      return new Promise<number>((resolve) => {
+        server.listen(port, () => {
+          const address = server.address();
+          const actual = typeof address === "object" && address ? address.port : port;
+          log.info("listening", { port: actual, issuer: config.issuer });
+          resolve(actual);
+        });
+      });
+    },
+    close() {
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+interface Deps {
+  engine: BookingEngine;
+  auth: AuthServer;
+  log: Logger;
+  config: PorterConfig;
+}
+
+async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Promise<void> {
+  const url = new URL(req.url ?? "/", deps.config.issuer);
+  const path = url.pathname;
+
+  if (path === "/healthz") return sendJson(res, 200, { ok: true });
+
+  if (path === "/.well-known/oauth-protected-resource") {
+    return sendJson(res, 200, deps.auth.protectedResourceMetadata());
+  }
+  if (path === "/.well-known/oauth-authorization-server") {
+    return sendJson(res, 200, deps.auth.authorizationServerMetadata());
+  }
+
+  if (path === "/oauth/register" && req.method === "POST") {
+    try {
+      const body = await readJson(req);
+      return sendJson(res, 201, deps.auth.registerClient(body as Record<string, unknown>));
+    } catch (error) {
+      return sendJson(res, 400, { error: "invalid_client_metadata", error_description: String((error as Error).message) });
+    }
+  }
+
+  if (path === "/oauth/authorize" && req.method === "GET") {
+    const q = url.searchParams;
+    const redirectUri = q.get("redirect_uri") ?? "";
+    try {
+      // In local development the user id is supplied directly. A real
+      // deployment authenticates the person here and uses their real id.
+      // Porter never sees or stores a Muse credential.
+      const userId = q.get("porter_user") ?? "user_demo";
+      const code = deps.auth.issueCode({
+        clientId: q.get("client_id") ?? "",
+        redirectUri,
+        codeChallenge: q.get("code_challenge") ?? "",
+        codeChallengeMethod: q.get("code_challenge_method") ?? "",
+        scope: q.get("scope") ?? SCOPES.join(" "),
+        userId,
+      });
+      const target = new URL(redirectUri);
+      target.searchParams.set("code", code);
+      const state = q.get("state");
+      if (state) target.searchParams.set("state", state);
+      res.writeHead(302, { Location: target.toString() });
+      return void res.end();
+    } catch (error) {
+      return sendJson(res, 400, { error: "invalid_request", error_description: String((error as Error).message) });
+    }
+  }
+
+  if (path === "/oauth/token" && req.method === "POST") {
+    try {
+      const form = await readForm(req);
+      const grant = form.get("grant_type");
+      if (grant === "authorization_code") {
+        return sendJson(res, 200, deps.auth.exchangeCode({
+          code: form.get("code") ?? "",
+          codeVerifier: form.get("code_verifier") ?? "",
+          clientId: form.get("client_id") ?? "",
+          redirectUri: form.get("redirect_uri") ?? "",
+        }));
+      }
+      if (grant === "refresh_token") {
+        return sendJson(res, 200, deps.auth.refreshToken({
+          refreshToken: form.get("refresh_token") ?? "",
+          clientId: form.get("client_id") ?? "",
+        }));
+      }
+      return sendJson(res, 400, { error: "unsupported_grant_type" });
+    } catch (error) {
+      return sendJson(res, 400, { error: String((error as Error).message) });
+    }
+  }
+
+  if (path === "/mcp") {
+    const ctx = deps.auth.authenticate(req.headers.authorization);
+    if (!ctx) {
+      res.writeHead(401, { "WWW-Authenticate": deps.auth.challengeHeader(), "Content-Type": "application/json" });
+      return void res.end(JSON.stringify({ error: "unauthorized" }));
+    }
+
+    const actor: Actor = { id: ctx.userId };
+    const mcp = buildMcpServer(deps.engine, actor, deps.log.child({ actor: ctx.userId, auth: ctx.method }));
+    const transport = createTransport();
+
+    res.on("close", () => {
+      void transport.close();
+      void mcp.close();
+    });
+
+    await mcp.connect(transport);
+    await transport.handleRequest(req, res);
+    return;
+  }
+
+  sendJson(res, 404, { error: "not_found" });
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) });
+  res.end(payload);
+}
+
+async function readBody(req: IncomingMessage, limitBytes = 1_000_000): Promise<string> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    size += buf.length;
+    if (size > limitBytes) throw new Error("payload_too_large");
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const raw = await readBody(req);
+  return raw ? JSON.parse(raw) : {};
+}
+
+async function readForm(req: IncomingMessage): Promise<URLSearchParams> {
+  const raw = await readBody(req);
+  const type = req.headers["content-type"] ?? "";
+  if (type.includes("application/json")) {
+    const obj = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    return new URLSearchParams(Object.entries(obj));
+  }
+  return new URLSearchParams(raw);
+}

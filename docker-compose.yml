@@ -1,0 +1,29 @@
+# Local development only. Milestone 2 runs on the in-memory store, so neither
+# service is required yet; they are here so the Postgres work in milestone 3
+# has somewhere to land.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: porter
+      POSTGRES_PASSWORD: porter
+      POSTGRES_DB: porter
+    ports: ["5432:5432"]
+    volumes: ["porter-pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U porter"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  porter-pgdata:
