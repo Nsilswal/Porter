@@ -23,6 +23,9 @@
       "path": "packages/adapters/web"
     },
     {
+      "path": "packages/adapters/square-public"
+    },
+    {
       "path": "packages/payments-stripe"
     },
     {

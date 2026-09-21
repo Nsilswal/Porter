@@ -28,6 +28,8 @@ export interface PorterConfig {
    * describe whatever actually ships.
    */
   readonly webSourcesPath: string | undefined;
+  /** Square public booking pages. Same gate as the web adapter. */
+  readonly squarePublicSourcesPath: string | undefined;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
@@ -75,5 +77,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
       refillPerSecond: Number(env.PORTER_RATE_ADAPTER_PER_SEC ?? 10),
     },
     webSourcesPath: env.PORTER_WEB_SOURCES || undefined,
+    squarePublicSourcesPath: env.PORTER_SQUARE_PUBLIC_SOURCES || undefined,
   };
 }

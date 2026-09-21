@@ -28,7 +28,7 @@ It also demonstrates the things that are easy to claim and hard to prove — tha
 ### Run the tests
 
 ```bash
-pnpm test        # 195 tests
+pnpm test        # 213 tests
 pnpm build       # typecheck everything
 ```
 
@@ -68,6 +68,7 @@ packages/
   adapters/square-appointments/  beauty and wellness, REST
   adapters/jobber/     home services, GraphQL
   adapters/web/        reads public booking pages; off by default
+  adapters/square-public/  reads Square's public booking pages; off by default
   db/                  Drizzle schema, in-memory store
   payments-stripe/     Stripe Connect gateway
 apps/
@@ -99,6 +100,7 @@ docs/                  research, plan, compliance mapping, deploy notes
 | `square-appointments` | beauty, wellness | slots, confirmed immediately | no | no | yes, from the booking profile |
 | `jobber` | home services | arrival windows, business confirms later | no | yes | none published |
 | `web` | both | reads public pages; **writes go to the user** | no | no | none published |
+| `square-public` | beauty, wellness | reads Square's public pages; **writes go to the user** | no | no | **yes, per service** |
 
 Square and Jobber are genuinely different products, and the difference is carried by capability flags rather than by branches in core:
 
@@ -130,7 +132,11 @@ Porter is built against the Muse Connector Terms and Policies, which are not mer
 
 **The web adapter reads, it does not write.** It covers businesses that aren't on a connected platform by reading their public page, and it is deliberately read-only. Reading a page wrongly returns a wrong price, which the confirmation step catches because the user sees it. *Booking* through a page wrongly books the wrong appointment, and there is no error to catch — it just happens. So writes hand the user a deep link to the business's own page, the same way a CAPTCHA or a bank's 3-D Secure prompt does. Porter never attempts to solve a CAPTCHA.
 
-It is **off unless `PORTER_WEB_SOURCES` is set**, and kept separate from the API adapters because the Muse Connector Policies name "violating robots.txt" as a prohibited practice. A Muse-facing deployment leaves it unset.
+**`square-public` is the interesting one.** Square's public booking pages carry the entire booking model in a single `<meta name="widget">` tag: the business, every service and variation with real prices and durations, staff, the location, the cancellation policy text, the no-show cutoff, and **per-variation no-show fees**. That last one is richer than the official Bookings API, which exposes only an account-level cancellation fee.
+
+It needs no merchant account, which is the difference between covering businesses that signed up and businesses that exist. Verified against a live page: 40 services from one salon, with a real 24-hour cutoff and a $120 fee on the colour service.
+
+Both are **off unless their source list is set**, and kept separate from the API adapters because the Muse Connector Policies name "violating robots.txt" as a prohibited practice. A Muse-facing deployment leaves it unset.
 
 **Money moves only after a confirmed summary.** Porter charges through its own Stripe account using Connect destination charges, so the business gets its share immediately. Three things matter in the detail:
 
@@ -146,7 +152,7 @@ Porter never stores or enters card details. It keeps opaque gateway references, 
 pnpm test
 ```
 
-195 tests: unit, adapter conformance, prompt injection, compliance, payments, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
+213 tests: unit, adapter conformance, prompt injection, compliance, payments, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
 
 Any new adapter must pass the conformance suite in `packages/adapters/contract` unchanged. That is what makes "add a platform without touching core" a real claim.
 

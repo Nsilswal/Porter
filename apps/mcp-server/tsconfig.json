@@ -37,6 +37,9 @@
     },
     {
       "path": "../../packages/adapters/web"
+    },
+    {
+      "path": "../../packages/adapters/square-public"
     }
   ]
 }

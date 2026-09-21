@@ -4,6 +4,7 @@ import { createMockAdapter } from "@porter/adapter-mock";
 import { createSquareAdapter } from "@porter/adapter-square-appointments";
 import { createJobberAdapter } from "@porter/adapter-jobber";
 import { createWebAdapter, type WebSource } from "@porter/adapter-web";
+import { createSquarePublicAdapter, type SquarePublicSource } from "@porter/adapter-square-public";
 import { readFileSync } from "node:fs";
 import type { PorterConfig } from "./config.js";
 
@@ -74,6 +75,21 @@ export function buildAdapters(config: PorterConfig, log: Logger): AdapterRegistr
       }
     } catch (error) {
       log.error("web_sources_unreadable", { path: config.webSourcesPath, cause: String(error) });
+    }
+  }
+
+  // Square's public booking pages. Reads what a merchant already publishes,
+  // so it covers businesses that have not connected an account. Read-only:
+  // booking hands the user a link to the business's own page.
+  if (config.squarePublicSourcesPath) {
+    try {
+      const sources = JSON.parse(readFileSync(config.squarePublicSourcesPath, "utf8")) as SquarePublicSource[];
+      if (sources.length > 0) {
+        adapters.push(createSquarePublicAdapter({ http, sources }));
+        log.warn("square_public_adapter_enabled", { sources: sources.length, note: "read-only; booking escalates to the user" });
+      }
+    } catch (error) {
+      log.error("square_public_sources_unreadable", { path: config.squarePublicSourcesPath, cause: String(error) });
     }
   }
 

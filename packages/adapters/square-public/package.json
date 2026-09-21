@@ -1,0 +1,24 @@
+{
+  "name": "@porter/adapter-square-public",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/fake-page.d.ts",
+      "default": "./dist/testing/fake-page.js"
+    }
+  },
+  "dependencies": {
+    "@porter/shared": "workspace:*",
+    "@porter/core": "workspace:*",
+    "@porter/adapter-contract": "workspace:*",
+    "@porter/adapter-web": "workspace:*"
+  }
+}

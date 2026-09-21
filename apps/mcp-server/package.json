@@ -15,6 +15,7 @@
     "@porter/adapter-square-appointments": "workspace:*",
     "@porter/adapter-jobber": "workspace:*",
     "@porter/payments-stripe": "workspace:*",
-    "@porter/adapter-web": "workspace:*"
+    "@porter/adapter-web": "workspace:*",
+    "@porter/adapter-square-public": "workspace:*"
   }
 }
