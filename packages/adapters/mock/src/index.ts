@@ -250,6 +250,15 @@ export class MockAdapter implements ProviderAdapter {
     return this.#policyFor(biz, record.startsAt);
   }
 
+  async getServiceCancellationPolicy(
+    query: { providerId: string; serviceId: string; startsAt: Date },
+    ctx: AdapterContext,
+  ): Promise<CancellationPolicy> {
+    await this.#gate(ctx, "servicePolicy");
+    const biz = this.#requireBusinessByProviderId(query.providerId);
+    return this.#policyFor(biz, query.startsAt);
+  }
+
   async listBookings(query: ListQuery, ctx: AdapterContext): Promise<Booking[]> {
     await this.#gate(ctx, "list");
     return [...this.#bookings.values()]

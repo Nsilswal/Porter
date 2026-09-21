@@ -337,14 +337,20 @@ Three design decisions worth recording:
 
 Stripe runs in **test mode only**. The server refuses to start with a live key unless `PORTER_ALLOW_LIVE_STRIPE=true`.
 
-### Milestone 5 — Muse packaging and submission
+### Milestone 5 — Muse packaging and submission ✅ **complete**
 `submission/` with every form field filled (per research §4.3), a 512×512 PNG icon under 256 KiB, hosted API/MCP documentation, and a demo mode a Meta reviewer can exercise end to end. `legal/` with the privacy notice (§4.3(c)), a terms-of-service page drafted so it imposes nothing on users beyond Meta's terms (§10), and the 48-hour incident runbook (§4.3(b)).
 
 Plus a `docs/muse-compliance.md` mapping every clause of the Terms and Policies to where Porter satisfies it — the document that answers a §4.4 audit. Plus README, `.env.example`, Docker Compose, Railway deploy notes.
 
 The submission describes Porter plainly as a multi-business aggregator. §2.1 requires submission information to be true and accurate and forbids obscuring functionality, and an accurate description is also what protects Porter against the "exceed declared scope" rule.
 
-*Exit:* a submission packet ready to paste into the Muse form, every required field satisfied, every clause mapped, and the Terms re-verified against the live page in case §9.4 changed them.
+*Exit met:* `submission/` holds every form field keyed to the form's own payload, a 512×512 PNG at 11 KiB, and a validator that applies Muse's own rules. `legal/` holds the privacy notice, terms of service and the 48-hour incident runbook. `docs/muse-compliance.md` maps every clause. `pnpm demo` walks the full lifecycle a reviewer will test.
+
+The Terms were re-verified against the live page on 2026-09-21: the form chunk is byte-identical to the 2026-09-18 capture, with the same required fields, character limits and icon rules. Nothing changed.
+
+Running the demo found a real defect: the booking summary reported "cancellation policy not published" for businesses that do publish one, because the policy lookup needed a booking that did not exist yet. Since the Policies require disclosing cancellation terms *before* a financial commitment, that undercut the central promise. Fixed by adding an optional `getServiceCancellationPolicy` to the adapter interface, with a regression test.
+
+**Two items remain open, and both are named in `docs/muse-compliance.md`:** upstream rights clearance (§4.2) and reading Meta's Data Protection Requirements (§4.3(d)).
 
 ### Deferred, explicitly
 Vagaro, Boulevard, Housecall Pro, ServiceTitan, Mindbody, MoeGo. The interface is designed for them. None are built now.

@@ -196,6 +196,16 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     return mapCancellationPolicy(profile, new Date(booking.start_at ?? ctx.now.toISOString()));
   }
 
+  /** Square's booking profile is account-level, so no booking is needed. */
+  async getServiceCancellationPolicy(
+    query: { providerId: string; serviceId: string; startsAt: Date },
+    ctx: AdapterContext,
+  ): Promise<CancellationPolicy> {
+    assertNotAborted(ctx.signal, this.id);
+    const profile = await this.#bookingProfile(ctx);
+    return mapCancellationPolicy(profile, query.startsAt);
+  }
+
   async listBookings(query: ListQuery, ctx: AdapterContext): Promise<Booking[]> {
     assertNotAborted(ctx.signal, this.id);
     const params = new URLSearchParams({ limit: String(Math.min(query.limit, 100)) });

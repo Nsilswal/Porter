@@ -171,6 +171,21 @@ export interface ProviderAdapter {
   cancelBooking(request: CancelRequest, ctx: AdapterContext): Promise<Booking>;
   getCancellationPolicy(bookingRef: string, ctx: AdapterContext): Promise<CancellationPolicy>;
 
+  /**
+   * The cancellation policy for a service, before any booking exists.
+   *
+   * The Muse Connector Policies forbid finalising a financial commitment
+   * without notice of the cancellation terms, and the terms have to be shown
+   * in the summary the user sees *before* they agree — at which point there is
+   * no booking reference to look up. Adapters whose platform publishes a
+   * policy at account or service level implement this; the rest omit it and
+   * core reports the policy as unknown.
+   */
+  getServiceCancellationPolicy?(
+    query: { providerId: string; serviceId: string; startsAt: Date },
+    ctx: AdapterContext,
+  ): Promise<CancellationPolicy>;
+
   listBookings?(query: ListQuery, ctx: AdapterContext): Promise<Booking[]>;
   messageProvider?(request: MessageRequest, ctx: AdapterContext): Promise<MessageReceipt>;
 }

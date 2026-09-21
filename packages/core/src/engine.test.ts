@@ -143,6 +143,40 @@ describe("BookingEngine — two-phase confirmation", () => {
   });
 });
 
+describe("BookingEngine — disclosure before commitment", () => {
+  it("shows the real cancellation policy in the booking summary", async () => {
+    // The Muse Connector Policies forbid finalising a financial commitment
+    // without notice of the cancellation terms. Those terms have to appear in
+    // the summary the user agrees to, when no booking exists yet to look up.
+    const h = createHarness();
+    const { slot } = await firstBookableSlot(h, "haircut");
+    const env = (await h.engine.createBooking(
+      h.actor,
+      { slot_id: slot.slot_id, customer_details: TEST_CUSTOMER, idempotency_key: "k1" },
+      h.signal,
+    )) as ConfirmationEnvelope;
+
+    // Shear Genius publishes one: free until 24 hours before, then $25.
+    expect(env.cancellationPolicy.known).toBe(true);
+    expect(env.cancellationPolicy.feeAmount).toBe(2500);
+    expect(env.cancellationPolicy.freeUntil).not.toBeNull();
+    expect(env.humanSummary).not.toContain("not published");
+  });
+
+  it("still says unknown when the business publishes nothing", async () => {
+    const h = createHarness();
+    // Volt Electric publishes no policy.
+    const { slot } = await firstBookableSlot(h, "home.electrical.install");
+    const env = (await h.engine.createBooking(
+      h.actor,
+      { slot_id: slot.slot_id, customer_details: TEST_CUSTOMER, idempotency_key: "k1" },
+      h.signal,
+    )) as ConfirmationEnvelope;
+    expect(env.cancellationPolicy.known).toBe(false);
+    expect(env.humanSummary).toContain("not published");
+  });
+});
+
 describe("BookingEngine — availability accuracy", () => {
   it("fails cleanly with alternatives when the slot goes between summary and commit", async () => {
     const h = createHarness();

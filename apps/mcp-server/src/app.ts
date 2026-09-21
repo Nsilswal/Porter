@@ -8,6 +8,7 @@ import { createLogger, systemClock, type Logger } from "@porter/shared";
 import { AuthServer, SCOPES } from "./auth.js";
 import { buildMcpServer, createTransport } from "./server.js";
 import { loadConfig, type PorterConfig } from "./config.js";
+import { connectorDocs } from "./docs.js";
 
 export interface PorterApp {
   readonly server: Server;
@@ -117,6 +118,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   const path = url.pathname;
 
   if (path === "/healthz") return sendJson(res, 200, { ok: true });
+
+  // Required by the Muse submission form (documentationUrl), and served from
+  // the app so it cannot drift from the deployed endpoint or demo credentials.
+  if (path === "/docs") {
+    const body = connectorDocs(deps.config);
+    res.writeHead(200, { "Content-Type": "text/markdown; charset=utf-8", "Content-Length": Buffer.byteLength(body) });
+    return void res.end(body);
+  }
 
   if (path === "/.well-known/oauth-protected-resource") {
     return sendJson(res, 200, deps.auth.protectedResourceMetadata());

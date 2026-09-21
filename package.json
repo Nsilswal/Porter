@@ -2,14 +2,18 @@
   "name": "porter",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc --build",
     "clean": "tsc --build --clean",
     "typecheck": "tsc --build --force",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev:mcp": "node --experimental-strip-types apps/mcp-server/src/index.ts"
+    "dev:mcp": "node --experimental-strip-types apps/mcp-server/src/index.ts",
+    "submission:validate": "node --experimental-strip-types submission/validate.ts",
+    "demo": "tsc --build && node apps/mcp-server/dist/demo.js"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

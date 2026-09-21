@@ -1005,10 +1005,22 @@ export class BookingEngine {
   }
 
   async #policyForService(actor: Actor, adapter: ProviderAdapter, token: SlotTokenPayload, signal: AbortSignal): Promise<CancellationPolicy> {
-    // Before a booking exists there is no booking ref, so the policy comes from
-    // the provider's published terms. Adapters that cannot say report unknown.
-    void actor; void adapter; void token; void signal;
-    return { known: false, freeUntil: null, feeAmount: null, text: null };
+    // The user has to see the cancellation terms in the summary, before they
+    // agree — and at that point no booking exists to look one up against.
+    // Adapters whose platform publishes a policy at account or service level
+    // answer this; the rest leave it unimplemented and it stays unknown.
+    if (!adapter.getServiceCancellationPolicy || !adapter.capabilities.cancellationPolicy) {
+      return { known: false, freeUntil: null, feeAmount: null, text: null };
+    }
+    try {
+      return await adapter.getServiceCancellationPolicy(
+        { providerId: token.p, serviceId: token.s, startsAt: new Date(token.t) },
+        this.#ctx(actor, adapter, signal),
+      );
+    } catch (error) {
+      this.#log.warn("service_policy_lookup_failed", { adapter: adapter.id, code: PorterError.is(error) ? error.code : "unknown" });
+      return { known: false, freeUntil: null, feeAmount: null, text: null };
+    }
   }
 
   async #policy(actor: Actor, adapter: ProviderAdapter, stored: StoredBooking, signal: AbortSignal): Promise<CancellationPolicy> {
