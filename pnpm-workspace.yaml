@@ -3,6 +3,9 @@ packages:
   - "packages/adapters/*"
   - "apps/*"
 
+allowBuilds:
+  esbuild: true
+
 # esbuild ships a platform binary and needs its postinstall to run. Everything
 # else is denied by default, so a dependency cannot execute code at install
 # time without being named here.
