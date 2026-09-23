@@ -7,6 +7,8 @@ export interface PorterConfig {
   readonly apiKeys: Record<string, string>;
   readonly logLevel: "debug" | "info" | "warn" | "error";
   readonly demoMode: boolean;
+  /** The development-only OAuth flow accepts an unverified user id. */
+  readonly devOAuthEnabled: boolean;
   readonly adapterLatencyMs: number;
   readonly adapterFailureRate: number;
   /** Off unless set. See apps/mcp-server/src/adapters.ts for the two gates. */
@@ -59,6 +61,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
     apiKeys,
     logLevel: (env.LOG_LEVEL as PorterConfig["logLevel"]) ?? "info",
     demoMode: env.PORTER_DEMO_MODE !== "false",
+    devOAuthEnabled: env.NODE_ENV !== "production",
     adapterLatencyMs: Number(env.PORTER_MOCK_LATENCY_MS ?? 0),
     adapterFailureRate: Number(env.PORTER_MOCK_FAILURE_RATE ?? 0),
     squareAccessToken: env.PORTER_SQUARE_ACCESS_TOKEN || undefined,

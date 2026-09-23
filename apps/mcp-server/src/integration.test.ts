@@ -48,6 +48,44 @@ function parse(result: any): any {
 }
 
 describe("auth surface", () => {
+  it("does not publish API keys in connector documentation", async () => {
+    const res = await fetch(`${baseUrl}/docs`);
+    const docs = await res.text();
+    expect(res.status).toBe(200);
+    expect(docs).not.toContain(API_KEY);
+    expect(docs).not.toContain(OTHER_API_KEY);
+  });
+
+  it("accepts a raw key in X-API-Key for custom connectors", async () => {
+    const res = await fetch(`${baseUrl}/v1/audit`, { headers: { "X-API-Key": API_KEY } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.entries).toBeInstanceOf(Array);
+  });
+
+  it("disables development OAuth on an API-key-only deployment", async () => {
+    const productionApp = createApp({
+      port: 0,
+      apiKeys: { [API_KEY]: "user_integration" },
+      signingSecret: "integration-signing-secret-long-enough-01",
+      logLevel: "error",
+      devOAuthEnabled: false,
+    });
+    const port = await productionApp.listen(0);
+    const origin = `http://127.0.0.1:${port}`;
+    try {
+      const metadata = await (await fetch(`${origin}/.well-known/oauth-protected-resource`)).json();
+      expect(metadata.authorization_servers).toEqual([]);
+      expect((await fetch(`${origin}/oauth/authorize`)).status).toBe(404);
+      expect((await fetch(`${origin}/oauth/register`, { method: "POST", body: "{}" })).status).toBe(404);
+      const docs = await (await fetch(`${origin}/docs`)).text();
+      expect(docs).not.toContain(API_KEY);
+      expect(docs).toContain("API key via Authorization: Bearer or X-API-Key");
+    } finally {
+      await productionApp.close();
+    }
+  });
+
   it("challenges an unauthenticated MCP request and points at discovery", async () => {
     const res = await fetch(`${baseUrl}/mcp`, { method: "POST", body: "{}" });
     expect(res.status).toBe(401);

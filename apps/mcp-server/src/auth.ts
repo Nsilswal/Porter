@@ -63,6 +63,7 @@ export interface AuthServerOptions {
   readonly resource: string;
   /** Static API keys mapped to user ids, for the custom-connector path. */
   readonly apiKeys?: Readonly<Record<string, string>>;
+  readonly oauthEnabled?: boolean;
   readonly accessTokenTtlMs?: number;
 }
 
@@ -81,6 +82,7 @@ export class AuthServer {
       issuer: options.issuer.replace(/\/$/, ""),
       resource: options.resource,
       apiKeys: options.apiKeys ?? {},
+      oauthEnabled: options.oauthEnabled ?? true,
       accessTokenTtlMs: options.accessTokenTtlMs ?? 60 * 60_000,
     };
   }
@@ -89,7 +91,7 @@ export class AuthServer {
   protectedResourceMetadata(): Record<string, unknown> {
     return {
       resource: this.#options.resource,
-      authorization_servers: [this.#options.issuer],
+      authorization_servers: this.#options.oauthEnabled ? [this.#options.issuer] : [],
       scopes_supported: [...SCOPES],
       bearer_methods_supported: ["header"],
       resource_documentation: `${this.#options.issuer}/docs`,
@@ -205,19 +207,22 @@ export class AuthServer {
   }
 
   /** Returns null when the credential is absent or invalid. */
-  authenticate(authorizationHeader: string | undefined): AuthContext | null {
-    if (!authorizationHeader) return null;
-    const [scheme, value] = authorizationHeader.split(" ");
-    if (!value) return null;
-
-    if (scheme?.toLowerCase() === "bearer") {
-      const token = this.#tokens.get(value);
-      if (token && token.expiresAt > Date.now()) {
-        return { userId: token.userId, scopes: token.scope.split(" ").filter(Boolean), method: "oauth" };
+  authenticate(authorizationHeader: string | undefined, apiKeyHeader?: string | string[]): AuthContext | null {
+    if (authorizationHeader) {
+      const [scheme, value] = authorizationHeader.split(" ");
+      if (scheme?.toLowerCase() === "bearer" && value) {
+        const token = this.#tokens.get(value);
+        if (token && token.expiresAt > Date.now()) {
+          return { userId: token.userId, scopes: token.scope.split(" ").filter(Boolean), method: "oauth" };
+        }
+        const userId = this.#options.apiKeys[value];
+        if (userId) return { userId, scopes: [...SCOPES], method: "api_key" };
       }
-      // Fall through: the same header carries a static API key in the
-      // custom-connector flow, which has no OAuth dance.
-      const userId = this.#options.apiKeys[value];
+    }
+    // Some custom connector UIs send a raw key as X-API-Key rather than
+    // constructing an Authorization header.
+    if (typeof apiKeyHeader === "string") {
+      const userId = this.#options.apiKeys[apiKeyHeader];
       if (userId) return { userId, scopes: [...SCOPES], method: "api_key" };
     }
     return null;
