@@ -1,6 +1,9 @@
 # Deploying Porter to Railway
 
-Hosting is Railway, decided in `plan.md` §9. Database is Railway Postgres.
+Railway hosts the remote MCP endpoint. The current server stores bookings and
+OAuth state in memory, so this guide is for a single-instance demo deployment.
+Restarting the service clears bookings. Do not add Postgres expecting it to
+persist them: the application does not yet read `DATABASE_URL`.
 
 ## 0. Check the image locally first
 
@@ -18,16 +21,19 @@ docker run --rm -p 8080:8080 \
 curl -s localhost:8080/healthz
 ```
 
-## 1. Create the service
+## 1. Create the service and domain
 
 ```bash
 railway login
-railway init
-railway up
+railway init --name porter
+railway add --service porter
+railway domain --port 8080
 ```
 
-Railway reads `railway.json`, builds from the `Dockerfile` and health-checks
-`GET /healthz`.
+Copy the generated `https://...up.railway.app` origin. Set variables below
+before deploying: the production image refuses to start without a signing
+secret. `railway up` then reads `railway.json`, builds from the `Dockerfile`,
+and health-checks `GET /healthz`.
 
 ## 2. Variables
 
@@ -37,8 +43,7 @@ Set these in the Railway dashboard, not in the repo.
 |---|---|---|
 | `PORTER_ISSUER` | `https://<your-app>.up.railway.app` | **Must exactly match the public origin.** It is the OAuth issuer and the RFC 9728 resource identifier. A mismatch breaks discovery. |
 | `PORTER_SIGNING_SECRET` | 32+ random characters, **stable** | Signs slot ids and confirmation tokens. Rotating it invalidates every outstanding one. Generate with `openssl rand -hex 32`. |
-| `PORTER_API_KEYS` | `<key>:<user-id>` | For the Muse custom-connector path and for reviewer demo access. |
-| `DATABASE_URL` | from the Postgres plugin | Railway injects this when you attach Postgres. |
+| `PORTER_API_KEYS` | `<random-key>:<user-id>` | For the Muse custom-connector path. Share the key privately; `/docs` does not display it. |
 | `LOG_LEVEL` | `info` | |
 | `PORTER_DEMO_MODE` | `true` | Keep on: Meta's review runs end-to-end tests. |
 
@@ -52,20 +57,18 @@ Leave these **unset** until the gates in `muse-compliance.md` are cleared:
 
 `PORTER_SIGNING_SECRET` is required in production: the server throws at startup without it rather than generating one silently, because a generated secret would be different on every restart and would invalidate everything already issued.
 
-## 3. Add Postgres
+After setting variables, deploy the current checkout with `railway up`.
 
-```bash
-railway add --database postgres
-```
+The local OAuth flow accepts an unverified `porter_user` value. Production
+disables its `/oauth/*` endpoints. Use an API key for a personal Muse test;
+implement real user sign-in and persistent OAuth state before claiming OAuth
+support in a public connector submission.
 
-Then run migrations. Generate them from the Drizzle schema first:
+## 3. Persistent storage
 
-```bash
-pnpm --filter @porter/db exec drizzle-kit generate
-pnpm --filter @porter/db exec drizzle-kit migrate
-```
-
-Milestone 2–4 run on the in-memory store, so Postgres is not strictly needed until you want state to survive a restart. It is needed before any real traffic.
+Postgres and Redis are not used by the running app. Add them only after wiring
+the store and OAuth state to persistent implementations. Keep this deployment
+to one instance and demo data.
 
 ## 4. Verify the deployment
 
@@ -87,8 +90,9 @@ Once `PORTER_ISSUER` is a real HTTPS origin, `<issuer>/mcp` is what goes in the
 submission form's **Hosted MCP endpoint** field, with connection type
 **Existing MCP**. Run `pnpm submission:validate` first.
 
-Before the directory listing exists, any Muse user can add the same endpoint as
-a **custom connector** — that path needs no Meta review.
+For a personal test, ask Muse to create a **Custom Connector** for the endpoint
+and provide the API key privately. Meta's public help page does not specify a
+guaranteed MCP custom-connector flow, so verify the connection in Muse.
 
 ## Notes
 

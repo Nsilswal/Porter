@@ -37,14 +37,15 @@ No account, no key, no config. Prints the business, every service with real pric
 ### Run the tests
 
 ```bash
-pnpm test        # 214 tests
+pnpm test        # builds first, then runs 223 tests
 pnpm build       # typecheck everything
 ```
 
 ### Drive it yourself with the MCP Inspector
 
 ```bash
-PORTER_API_KEYS=demo-key:user_demo pnpm dev:mcp
+cp .env.example .env
+pnpm dev:mcp
 npx @modelcontextprotocol/inspector
 ```
 
@@ -161,7 +162,7 @@ Porter never stores or enters card details. It keeps opaque gateway references, 
 pnpm test
 ```
 
-214 tests: unit, adapter conformance, prompt injection, compliance, payments, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
+223 tests: unit, adapter conformance, prompt injection, compliance, payments, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
 
 Any new adapter must pass the conformance suite in `packages/adapters/contract` unchanged. That is what makes "add a platform without touching core" a real claim.
 

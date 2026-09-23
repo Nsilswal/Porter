@@ -73,6 +73,7 @@ export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
     issuer: config.issuer,
     resource: `${config.issuer}/mcp`,
     apiKeys: config.apiKeys,
+    oauthEnabled: config.devOAuthEnabled,
   });
 
   const server = createServer((req, res) => {
@@ -125,6 +126,12 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
     const body = connectorDocs(deps.config);
     res.writeHead(200, { "Content-Type": "text/markdown; charset=utf-8", "Content-Length": Buffer.byteLength(body) });
     return void res.end(body);
+  }
+
+  // The local OAuth flow has no user sign-in: its porter_user parameter is
+  // supplied by the caller. Never expose it on a production deployment.
+  if (!deps.config.devOAuthEnabled && (path.startsWith("/oauth/") || path === "/.well-known/oauth-authorization-server")) {
+    return sendJson(res, 404, { error: "not_found" });
   }
 
   if (path === "/.well-known/oauth-protected-resource") {
@@ -198,7 +205,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   // complete record of what their agent did, and Porter can back that — from
   // hashes and outcomes alone, because the log holds no personal data.
   if (path === "/v1/audit" && req.method === "GET") {
-    const ctx = deps.auth.authenticate(req.headers.authorization);
+    const ctx = deps.auth.authenticate(req.headers.authorization, req.headers["x-api-key"]);
     if (!ctx) {
       res.writeHead(401, { "WWW-Authenticate": deps.auth.challengeHeader(), "Content-Type": "application/json" });
       return void res.end(JSON.stringify({ error: "unauthorized" }));
@@ -208,7 +215,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   }
 
   if (path === "/mcp") {
-    const ctx = deps.auth.authenticate(req.headers.authorization);
+    const ctx = deps.auth.authenticate(req.headers.authorization, req.headers["x-api-key"]);
     if (!ctx) {
       res.writeHead(401, { "WWW-Authenticate": deps.auth.challengeHeader(), "Content-Type": "application/json" });
       return void res.end(JSON.stringify({ error: "unauthorized" }));

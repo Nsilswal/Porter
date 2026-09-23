@@ -5,12 +5,12 @@ import type { PorterConfig } from "./config.js";
  *
  * `documentationUrl` is a required field, and Meta's review includes
  * end-to-end testing, so a reviewer needs to be able to read this and then
- * actually drive the connector. It is served from the app so it can never
- * drift from the deployed endpoint or the demo credentials.
+ * actually drive the connector. Credentials must be shared privately, never
+ * included in this public document.
  */
 export function connectorDocs(config: PorterConfig): string {
   const issuer = config.issuer;
-  const demoKey = Object.keys(config.apiKeys)[0];
+  const hasApiKey = Object.keys(config.apiKeys).length > 0;
 
   return `# Porter — connector documentation
 
@@ -27,10 +27,10 @@ behind one tool surface. It is not a single business's booking page.
 |---|---|
 | Protocol | Model Context Protocol, Streamable HTTP |
 | Endpoint | \`${issuer}/mcp\` |
-| Auth | OAuth 2.1 with PKCE (S256), or a bearer API key |
+| Auth | ${config.devOAuthEnabled ? "Development OAuth with PKCE (S256), or an API key" : "API key via Authorization: Bearer or X-API-Key"} |
 | Discovery | \`${issuer}/.well-known/oauth-protected-resource\` (RFC 9728) |
-| Auth server metadata | \`${issuer}/.well-known/oauth-authorization-server\` (RFC 8414) |
-| Registration | Dynamic client registration at \`${issuer}/oauth/register\` |
+${config.devOAuthEnabled ? `| Auth server metadata | \`${issuer}/.well-known/oauth-authorization-server\` (RFC 8414) |
+| Registration | Dynamic client registration at \`${issuer}/oauth/register\` |` : ""}
 | Health | \`${issuer}/healthz\` |
 | Audit trail | \`GET ${issuer}/v1/audit\` (authenticated) |
 
@@ -106,7 +106,7 @@ ${config.rateLimitPerUser.refillPerSecond}/second. \`RATE_LIMITED\` carries
 ## Demo mode for reviewers
 
 ${
-  demoKey
+  config.demoMode && hasApiKey
     ? `Demo mode is **on**. It serves realistic sample businesses across beauty and
 home services, with working availability, deposits, cancellation fees and
 quote-required jobs. No real merchant account is touched and no real money
@@ -114,7 +114,7 @@ moves.
 
 \`\`\`
 Endpoint:      ${issuer}/mcp
-Authorization: Bearer ${demoKey}
+Authorization: Bearer <key provided privately by the operator>
 \`\`\`
 
 A full lifecycle a reviewer can run: \`search_providers\` (category
