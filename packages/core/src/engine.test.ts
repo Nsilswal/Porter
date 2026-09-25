@@ -73,7 +73,7 @@ describe("BookingEngine — two-phase confirmation", () => {
     expect(bookings).toHaveLength(1);
   });
 
-  it("rejects a confirmation token that has already been used", async () => {
+  it("rejects a confirmation token reused for a different appointment", async () => {
     const { slot, slots } = await firstBookableSlot(h);
     const env = (await h.engine.createBooking(
       h.actor,
@@ -87,14 +87,14 @@ describe("BookingEngine — two-phase confirmation", () => {
       h.signal,
     );
 
-    // Same token, different idempotency key: the token must still be spent.
+    // Another request id cannot transfer consent to a different appointment.
     await expect(
       h.engine.createBooking(
         h.actor,
         { slot_id: slots[1]!.slot_id, customer_details: TEST_CUSTOMER, idempotency_key: "k2", confirmation_token: env.confirmationToken },
         h.signal,
       ),
-    ).rejects.toSatisfy((e: unknown) => PorterError.is(e) && e.code === "CONFIRMATION_EXPIRED");
+    ).rejects.toSatisfy((e: unknown) => PorterError.is(e) && e.code === "CONFIRMATION_STALE");
   });
 
   it("rejects an expired confirmation token", async () => {

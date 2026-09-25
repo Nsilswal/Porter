@@ -3,6 +3,7 @@ import {
   money,
   newId,
   sanitize,
+  stableHash,
   type Clock,
   type Logger,
   type Money,
@@ -19,7 +20,7 @@ import {
 } from "./confirmation.js";
 import { projectCustomer, type CustomerDetails, type CustomerField } from "./customer.js";
 import type { CancellationPolicy, Service, Slot } from "./domain.js";
-import { Idempotency } from "./idempotency.js";
+import { Idempotency, type WriteAttempt } from "./idempotency.js";
 import type { Store, StoredBooking } from "./ports.js";
 import { RateLimiter } from "./ratelimit.js";
 import { resolveCategory, type ServiceCategory } from "./taxonomy.js";
@@ -46,6 +47,11 @@ import type {
   PaymentRecord,
   PayoutDirectory,
 } from "./payments.js";
+
+interface ConfirmedMutation {
+  readonly token: string;
+  readonly attempt: WriteAttempt;
+}
 
 export interface Actor {
   /** Pseudonymous user id. Never an email or phone number. */
@@ -354,6 +360,13 @@ export class BookingEngine {
   // ----------------------------------------------------------------- writes
 
   async createBooking(actor: Actor, args: CreateBookingArgs, signal: AbortSignal): Promise<MaybeConfirm<BookingResult>> {
+    const token = args.confirmation_token;
+    if (!token) return this.#createBooking(actor, args, signal);
+    return this.#idem.run(actor.id, "create_booking", args.idempotency_key, createRequest(args),
+      (attempt) => this.#createBooking(actor, args, signal, { token, attempt }));
+  }
+
+  async #createBooking(actor: Actor, args: CreateBookingArgs, signal: AbortSignal, commit?: ConfirmedMutation): Promise<MaybeConfirm<BookingResult>> {
     const started = this.#clock.nowMs();
     if (!args.slot_id) {
       throw new PorterError("INVALID_REQUEST", "Pick an appointment time first, then book it.");
@@ -370,7 +383,7 @@ export class BookingEngine {
     );
 
     // ---- phase 1: quote the terms, change nothing -------------------------
-    if (!args.confirmation_token) {
+    if (!commit) {
       const { service, providerName } = await this.#describe(actor, adapter, slotToken, signal);
       const fresh = await this.#recheck(actor, adapter, slotToken, signal);
       const policy = await this.#policyForService(actor, adapter, slotToken, signal);
@@ -378,9 +391,7 @@ export class BookingEngine {
       const price = fresh.price ?? service?.price ?? null;
       const deposit = service?.depositRequired ?? null;
       const chargeNow = deposit ?? null;
-      const breakdown: LineItem[] = [];
-      if (price) breakdown.push({ label: "Service", amount: price });
-      if (deposit) breakdown.push({ label: "Deposit due now", amount: deposit });
+      const breakdown = bookingBreakdown(price, deposit);
 
       const envelope = this.#envelope({
         action: "book",
@@ -398,7 +409,10 @@ export class BookingEngine {
         providerId: slotToken.p,
         serviceId: slotToken.s,
         startsAtMs: fresh.startsAt.getTime(),
-        data: { slot_id: args.slot_id, customer, notes: args.notes ?? null },
+        endsAtMs: fresh.endsAt.getTime(),
+        locationId: fresh.locationId,
+        providerSlotRef: fresh.providerSlotRef ?? null,
+        data: createRequest(args),
       });
 
       await this.#audit.record({ actorId: actor.id, tool: "create_booking", action: "quote", adapterId: adapter.id, providerId: slotToken.p, args: redactArgs(args), outcome: "ok", startedAtMs: started, disclosedFields: [] });
@@ -406,97 +420,110 @@ export class BookingEngine {
     }
 
     // ---- phase 2: commit --------------------------------------------------
-    const token = decodeConfirmationToken(this.#signer, args.confirmation_token, this.#clock);
-    this.#assertToken(token, actor, "book");
+    const token = decodeConfirmationToken(this.#signer, commit.token, this.#clock);
+    this.#assertToken(token, actor, "book", createRequest(args));
 
-    return this.#idem.run(actor.id, "create_booking", args.idempotency_key, { slot: args.slot_id, customer, notes: args.notes ?? null }, async () => {
-      const { service, providerName } = await this.#describe(actor, adapter, slotToken, signal);
-      const fresh = await this.#recheck(actor, adapter, slotToken, signal);
-      const policy = await this.#policyForService(actor, adapter, slotToken, signal);
+    const { service, providerName } = await this.#describe(actor, adapter, slotToken, signal);
+    const fresh = await this.#recheck(actor, adapter, slotToken, signal);
+    const policy = await this.#policyForService(actor, adapter, slotToken, signal);
 
-      const price = fresh.price ?? service?.price ?? null;
-      const deposit = service?.depositRequired ?? null;
-      const chargeNow = deposit ?? null;
+    const price = fresh.price ?? service?.price ?? null;
+    const deposit = service?.depositRequired ?? null;
+    const chargeNow = deposit ?? null;
 
-      // Spend the token first, so a confirmation is single-use whatever
-      // happens next. A stale-terms failure needs a fresh summary anyway.
-      await this.#consume(token);
+    // Spend the token first, so a confirmation is single-use whatever
+    // happens next. A stale-terms failure needs a fresh summary anyway.
+    await this.#consume(token);
 
-      // Re-derive the terms and compare. If the price, time or policy moved
-      // between the summary and the commit, the confirmation is void.
-      const rederived = termsHash({
-        action: "book",
-        providerId: slotToken.p,
-        serviceId: slotToken.s,
-        startsAtMs: fresh.startsAt.getTime(),
-        amountMinor: (chargeNow ?? price)?.amount ?? null,
-        currency: (chargeNow ?? price)?.currency ?? null,
-        feeMinor: policy.feeAmount?.amount ?? null,
-        nonRefundable: false,
-        recurrence: { kind: "one_off" },
-      });
-      if (rederived !== token.terms) {
-        throw new PorterError("CONFIRMATION_STALE", "The price or time changed since we showed you the summary. Ask for a fresh summary and confirm again.");
-      }
-
-      let hold: string | undefined;
-      if (adapter.holdSlot && adapter.capabilities.slotHold) {
-        try {
-          hold = (await adapter.holdSlot({ providerId: slotToken.p, serviceId: slotToken.s, startsAt: fresh.startsAt, ...(fresh.providerSlotRef ? { providerSlotRef: fresh.providerSlotRef } : {}) }, this.#ctx(actor, adapter, signal))).ref;
-        } catch {
-          // A hold is an optimisation. Losing it is not fatal; the create call
-          // still re-checks and fails cleanly if the slot went.
-        }
-      }
-
-      const booking = await adapter.createBooking(
-        {
-          providerId: slotToken.p,
-          locationId: slotToken.l,
-          serviceId: slotToken.s,
-          startsAt: fresh.startsAt,
-          endsAt: fresh.endsAt,
-          customer,
-          idempotencyKey: derivedKey(args.idempotency_key, "create"),
-          ...(fresh.providerSlotRef ? { providerSlotRef: fresh.providerSlotRef } : {}),
-          ...(hold ? { holdRef: hold } : {}),
-          ...(args.notes ? { notes: args.notes } : {}),
-          ...(args.quote_id ? { quoteId: args.quote_id } : {}),
-        },
-        this.#ctx(actor, adapter, signal),
-      );
-
-      const stored: StoredBooking = {
-        id: newId("bk"),
-        userId: actor.id,
-        adapterId: adapter.id,
-        providerBookingRef: booking.providerBookingRef,
-        status: booking.status,
-        startsAt: booking.startsAt,
-        endsAt: booking.endsAt,
-        providerId: booking.providerId,
-        locationId: booking.locationId,
-        serviceId: booking.serviceId,
-        providerName: sanitize(providerName, { maxLength: 120, label: "business name" }),
-        serviceName: sanitize(service?.name ?? "Appointment", { maxLength: 120, label: "service name" }),
-        priceMinor: booking.price?.amount ?? null,
-        currency: booking.price?.currency ?? null,
-        depositMinor: service?.depositRequired?.amount ?? booking.deposit?.amount ?? null,
-        paidMinor: 0,
-        createdAt: booking.createdAt,
-        updatedAt: booking.updatedAt,
-      };
-      await this.#store.bookings.put(stored);
-
-      await this.#audit.record({ actorId: actor.id, tool: "create_booking", action: "commit", adapterId: adapter.id, providerId: booking.providerId, args: redactArgs(args), idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started, disclosedFields: disclosure.fields });
-
-      return { status: "ok" as const, booking: bookingView(stored) };
+    // Re-derive the terms and compare. If the price, time or policy moved
+    // between the summary and the commit, the confirmation is void.
+    const rederived = termsHash({
+      action: "book",
+      providerId: slotToken.p,
+      serviceId: slotToken.s,
+      startsAtMs: fresh.startsAt.getTime(),
+      endsAtMs: fresh.endsAt.getTime(),
+      locationId: fresh.locationId,
+      providerSlotRef: fresh.providerSlotRef ?? null,
+      moneyKind: chargeNow ? "deposit" : price ? "total" : "none",
+      amountMinor: (chargeNow ?? price)?.amount ?? null,
+      currency: (chargeNow ?? price)?.currency ?? null,
+      cancellationPolicy: policy,
+      breakdown: bookingBreakdown(price, deposit),
+      nonRefundable: false,
+      recurrence: { kind: "one_off" },
     });
+    if (rederived !== token.terms) {
+      throw new PorterError("CONFIRMATION_STALE", "The price or time changed since we showed you the summary. Ask for a fresh summary and confirm again.");
+    }
+
+    const providerKey = derivedKey(actor.id, adapter.id, slotToken.p, args.idempotency_key, "create");
+    await commit.attempt.beforeWrite({ adapterId: adapter.id, providerId: slotToken.p, providerOperation: "create", idempotencyKey: providerKey });
+    let hold: string | undefined;
+    if (adapter.holdSlot && adapter.capabilities.slotHold) {
+      try {
+        hold = (await adapter.holdSlot({ providerId: slotToken.p, serviceId: slotToken.s, startsAt: fresh.startsAt, ...(fresh.providerSlotRef ? { providerSlotRef: fresh.providerSlotRef } : {}) }, this.#ctx(actor, adapter, signal))).ref;
+      } catch {
+        // A hold is an optimisation. Losing it is not fatal; the create call
+        // still re-checks and fails cleanly if the slot went.
+      }
+    }
+
+    const booking = await adapter.createBooking(
+      {
+        providerId: slotToken.p,
+        locationId: slotToken.l,
+        serviceId: slotToken.s,
+        startsAt: fresh.startsAt,
+        endsAt: fresh.endsAt,
+        customer,
+        idempotencyKey: providerKey,
+        ...(fresh.providerSlotRef ? { providerSlotRef: fresh.providerSlotRef } : {}),
+        ...(hold ? { holdRef: hold } : {}),
+        ...(args.notes ? { notes: args.notes } : {}),
+        ...(args.quote_id ? { quoteId: args.quote_id } : {}),
+      },
+      this.#ctx(actor, adapter, signal),
+    );
+
+    const stored: StoredBooking = {
+      id: newId("bk"),
+      userId: actor.id,
+      adapterId: adapter.id,
+      providerBookingRef: booking.providerBookingRef,
+      status: booking.status,
+      startsAt: booking.startsAt,
+      endsAt: booking.endsAt,
+      providerId: booking.providerId,
+      locationId: booking.locationId,
+      serviceId: booking.serviceId,
+      providerName: sanitize(providerName, { maxLength: 120, label: "business name" }),
+      serviceName: sanitize(service?.name ?? "Appointment", { maxLength: 120, label: "service name" }),
+      priceMinor: booking.price?.amount ?? null,
+      currency: booking.price?.currency ?? null,
+      depositMinor: service?.depositRequired?.amount ?? booking.deposit?.amount ?? null,
+      paidMinor: 0,
+      createdAt: booking.createdAt,
+      updatedAt: booking.updatedAt,
+    };
+    await this.#store.bookings.put(stored);
+
+    await this.#audit.record({ actorId: actor.id, tool: "create_booking", action: "commit", adapterId: adapter.id, providerId: booking.providerId, args: redactArgs(args), idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started, disclosedFields: disclosure.fields });
+
+    return { status: "ok" as const, booking: bookingView(stored) };
   }
 
   async rescheduleBooking(actor: Actor, args: RescheduleArgs, signal: AbortSignal): Promise<MaybeConfirm<BookingResult>> {
+    const token = args.confirmation_token;
+    if (!token) return this.#rescheduleBooking(actor, args, signal);
+    return this.#mutateBooking(actor, args.booking_id, "reschedule_booking", args.idempotency_key, rescheduleRequest(args),
+      (attempt) => this.#rescheduleBooking(actor, args, signal, { token, attempt }));
+  }
+
+  async #rescheduleBooking(actor: Actor, args: RescheduleArgs, signal: AbortSignal, commit?: ConfirmedMutation): Promise<MaybeConfirm<BookingResult>> {
     const started = this.#clock.nowMs();
     const stored = await this.#requireBooking(actor, args.booking_id);
+    assertActiveBooking(stored);
     const adapter = this.#requireAdapter(stored.adapterId);
     this.#limiter.check(actor.id, adapter.id);
 
@@ -505,13 +532,15 @@ export class BookingEngine {
     }
 
     const slotToken = decodeSlotToken(this.#signer, args.new_slot_id);
-    if (slotToken.a !== adapter.id || slotToken.p !== stored.providerId) {
-      throw new PorterError("INVALID_REQUEST", "That new time belongs to a different business.");
+    if (slotToken.a !== adapter.id || slotToken.p !== stored.providerId || slotToken.s !== stored.serviceId || slotToken.l !== stored.locationId) {
+      throw new PorterError("INVALID_REQUEST", "Choose a new time for the same service at the same location.");
     }
 
-    const policy = await this.#policy(actor, adapter, stored, signal);
+    const policy = adapter.getServiceCancellationPolicy
+      ? await this.#policyForService(actor, adapter, slotToken, signal)
+      : await this.#policy(actor, adapter, stored, signal);
 
-    if (!args.confirmation_token) {
+    if (!commit) {
       const fresh = await this.#recheck(actor, adapter, slotToken, signal);
       const envelope = this.#envelope({
         action: "reschedule",
@@ -522,64 +551,85 @@ export class BookingEngine {
           startsAt: fresh.startsAt.toISOString(),
           durationMinutes: Math.round((fresh.endsAt.getTime() - fresh.startsAt.getTime()) / 60_000),
         },
-        moneyKind: "none",
-        total: null,
-        breakdown: [],
+        moneyKind: fresh.price ? "total" : "none",
+        total: fresh.price ?? null,
+        breakdown: fresh.price ? [{ label: "Service", amount: fresh.price }] : [],
         policy,
         providerId: stored.providerId,
         serviceId: stored.serviceId,
         startsAtMs: fresh.startsAt.getTime(),
-        data: { booking_id: args.booking_id, new_slot_id: args.new_slot_id },
+        endsAtMs: fresh.endsAt.getTime(),
+        locationId: fresh.locationId,
+        providerSlotRef: fresh.providerSlotRef ?? null,
+        data: rescheduleConfirmationRequest(args, stored),
       });
       await this.#audit.record({ actorId: actor.id, tool: "reschedule_booking", action: "quote", adapterId: adapter.id, providerId: stored.providerId, args, outcome: "ok", startedAtMs: started });
       return envelope;
     }
 
-    const token = decodeConfirmationToken(this.#signer, args.confirmation_token, this.#clock);
-    this.#assertToken(token, actor, "reschedule");
+    const token = decodeConfirmationToken(this.#signer, commit.token, this.#clock);
+    this.#assertToken(token, actor, "reschedule", rescheduleConfirmationRequest(args, stored));
 
-    return this.#idem.run(actor.id, "reschedule_booking", args.idempotency_key, { booking: args.booking_id, slot: args.new_slot_id }, async () => {
-      const fresh = await this.#recheck(actor, adapter, slotToken, signal);
-      await this.#consume(token);
+    const fresh = await this.#recheck(actor, adapter, slotToken, signal);
+    await this.#consume(token);
 
-      const rederived = termsHash({
-        action: "reschedule",
+    const rederived = termsHash({
+      action: "reschedule",
+      providerId: stored.providerId,
+      serviceId: stored.serviceId,
+      startsAtMs: fresh.startsAt.getTime(),
+      endsAtMs: fresh.endsAt.getTime(),
+      locationId: fresh.locationId,
+      providerSlotRef: fresh.providerSlotRef ?? null,
+      moneyKind: fresh.price ? "total" : "none",
+      amountMinor: fresh.price?.amount ?? null,
+      currency: fresh.price?.currency ?? null,
+      cancellationPolicy: policy,
+      breakdown: fresh.price ? [{ label: "Service", amount: fresh.price }] : [],
+      nonRefundable: false,
+      recurrence: { kind: "one_off" },
+    });
+    if (rederived !== token.terms) {
+      throw new PorterError("CONFIRMATION_STALE", "That time changed since we showed you the summary. Ask for a fresh summary and confirm again.");
+    }
+
+    const providerKey = derivedKey(actor.id, adapter.id, stored.providerId, args.idempotency_key, "reschedule");
+    await commit.attempt.beforeWrite({ adapterId: adapter.id, providerId: stored.providerId, providerOperation: "reschedule", idempotencyKey: providerKey, providerBookingRef: stored.providerBookingRef });
+    const moved = await adapter.rescheduleBooking(
+      {
+        bookingRef: stored.providerBookingRef,
         providerId: stored.providerId,
         serviceId: stored.serviceId,
-        startsAtMs: fresh.startsAt.getTime(),
-        amountMinor: null,
-        currency: null,
-        feeMinor: policy.feeAmount?.amount ?? null,
-        nonRefundable: false,
-        recurrence: { kind: "one_off" },
-      });
-      if (rederived !== token.terms) {
-        throw new PorterError("CONFIRMATION_STALE", "That time changed since we showed you the summary. Ask for a fresh summary and confirm again.");
-      }
+        startsAt: fresh.startsAt,
+        endsAt: fresh.endsAt,
+        idempotencyKey: providerKey,
+        ...(fresh.providerSlotRef ? { providerSlotRef: fresh.providerSlotRef } : {}),
+      },
+      this.#ctx(actor, adapter, signal),
+    );
 
-      const moved = await adapter.rescheduleBooking(
-        {
-          bookingRef: stored.providerBookingRef,
-          providerId: stored.providerId,
-          serviceId: stored.serviceId,
-          startsAt: fresh.startsAt,
-          endsAt: fresh.endsAt,
-          idempotencyKey: derivedKey(args.idempotency_key, "reschedule"),
-          ...(fresh.providerSlotRef ? { providerSlotRef: fresh.providerSlotRef } : {}),
-        },
-        this.#ctx(actor, adapter, signal),
-      );
-
-      const updated: StoredBooking = { ...stored, status: moved.status, startsAt: moved.startsAt, endsAt: moved.endsAt, updatedAt: moved.updatedAt };
-      await this.#store.bookings.put(updated);
-      await this.#audit.record({ actorId: actor.id, tool: "reschedule_booking", action: "commit", adapterId: adapter.id, providerId: stored.providerId, args, idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started });
-      return { status: "ok" as const, booking: bookingView(updated) };
-    });
+    const updated: StoredBooking = {
+      ...stored, status: moved.status, startsAt: moved.startsAt, endsAt: moved.endsAt,
+      priceMinor: moved.price?.amount ?? stored.priceMinor,
+      currency: moved.price?.currency ?? stored.currency,
+      updatedAt: moved.updatedAt,
+    };
+    await this.#store.bookings.put(updated);
+    await this.#audit.record({ actorId: actor.id, tool: "reschedule_booking", action: "commit", adapterId: adapter.id, providerId: stored.providerId, args, idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started });
+    return { status: "ok" as const, booking: bookingView(updated) };
   }
 
   async cancelBooking(actor: Actor, args: CancelArgs, signal: AbortSignal): Promise<MaybeConfirm<CancelResult>> {
+    const token = args.confirmation_token;
+    if (!token) return this.#cancelBooking(actor, args, signal);
+    return this.#mutateBooking(actor, args.booking_id, "cancel_booking", args.idempotency_key, cancelRequest(args),
+      (attempt) => this.#cancelBooking(actor, args, signal, { token, attempt }));
+  }
+
+  async #cancelBooking(actor: Actor, args: CancelArgs, signal: AbortSignal, commit?: ConfirmedMutation): Promise<MaybeConfirm<CancelResult>> {
     const started = this.#clock.nowMs();
     const stored = await this.#requireBooking(actor, args.booking_id);
+    assertActiveBooking(stored);
     const adapter = this.#requireAdapter(stored.adapterId);
     this.#limiter.check(actor.id, adapter.id);
 
@@ -587,7 +637,7 @@ export class BookingEngine {
     const policy = await this.#policy(actor, adapter, stored, signal);
     const feeDue = feeApplies(policy, this.#clock.now()) ? policy.feeAmount : null;
 
-    if (!args.confirmation_token) {
+    if (!commit) {
       const envelope = this.#envelope({
         action: "cancel",
         actor,
@@ -604,95 +654,110 @@ export class BookingEngine {
         providerId: stored.providerId,
         serviceId: stored.serviceId,
         startsAtMs: stored.startsAt.getTime(),
+        endsAtMs: stored.endsAt.getTime(),
+        locationId: stored.locationId,
+        providerSlotRef: null,
         nonRefundable: feeDue !== null,
-        data: { booking_id: args.booking_id, reason: args.reason ?? null },
+        data: cancelRequest(args),
       });
       await this.#audit.record({ actorId: actor.id, tool: "cancel_booking", action: "quote", adapterId: adapter.id, providerId: stored.providerId, args, outcome: "ok", startedAtMs: started });
       return envelope;
     }
 
-    const token = decodeConfirmationToken(this.#signer, args.confirmation_token, this.#clock);
-    this.#assertToken(token, actor, "cancel");
+    const token = decodeConfirmationToken(this.#signer, commit.token, this.#clock);
+    this.#assertToken(token, actor, "cancel", cancelRequest(args));
 
-    return this.#idem.run(actor.id, "cancel_booking", args.idempotency_key, { booking: args.booking_id }, async () => {
-      await this.#consume(token);
+    await this.#consume(token);
 
-      const rederived = termsHash({
-        action: "cancel",
-        providerId: stored.providerId,
-        serviceId: stored.serviceId,
-        startsAtMs: stored.startsAt.getTime(),
-        amountMinor: feeDue?.amount ?? null,
-        currency: feeDue?.currency ?? null,
-        feeMinor: policy.feeAmount?.amount ?? null,
-        nonRefundable: feeDue !== null,
-        recurrence: { kind: "one_off" },
-      });
-      if (rederived !== token.terms) {
-        throw new PorterError("CONFIRMATION_STALE", "The cancellation fee changed since we showed you the summary. Ask for a fresh summary and confirm again.");
-      }
-
-      const cancelled = await adapter.cancelBooking(
-        {
-          bookingRef: stored.providerBookingRef,
-          providerId: stored.providerId,
-          idempotencyKey: derivedKey(args.idempotency_key, "cancel"),
-          ...(args.reason ? { reason: args.reason } : {}),
-        },
-        this.#ctx(actor, adapter, signal),
-      );
-
-      // Cancel first, then settle the money.
-      //
-      // The order matters. If the fee charge fails, the appointment is still
-      // cancelled — which is what the user asked for and confirmed — and the
-      // unpaid fee is a debt to chase, not a reason to leave them booked in.
-      // Doing it the other way round could take a fee and then fail to
-      // cancel, which is the worse failure by far.
-      let feeCharged: Money | null = null;
-      let feeError: string | null = null;
-      if (feeDue) {
-        try {
-          if (!this.#payments) throw new PorterError("UNSUPPORTED_CAPABILITY", "Fee collection is not switched on.");
-          await this.#charge(actor, stored, feeDue, "cancellation_fee", derivedKey(args.idempotency_key, "fee"));
-          feeCharged = feeDue;
-        } catch (error) {
-          feeError = PorterError.is(error) ? error.code : "ADAPTER_DOWN";
-          this.#log.warn("cancellation_fee_uncollected", { code: feeError, adapter: adapter.id });
-        }
-      }
-
-      // A deposit already paid is refunded when no fee is due.
-      if (!feeDue && stored.paidMinor > 0 && this.#payments) {
-        const paid = await this.#store.payments.listForBooking(actor.id, stored.id);
-        for (const record of paid.filter((r) => r.status === "succeeded" && r.kind !== "cancellation_fee")) {
-          try {
-            await this.#payments.refund({
-              paymentId: record.gatewayPaymentRef,
-              amount: { amount: record.amountMinor, currency: record.currency },
-              idempotencyKey: derivedKey(args.idempotency_key, `refund:${record.id}`),
-              reason: "requested_by_customer",
-            });
-            await this.#store.payments.put({ ...record, status: "refunded" });
-          } catch (error) {
-            this.#log.warn("refund_failed", { code: PorterError.is(error) ? error.code : "unknown" });
-          }
-        }
-      }
-
-      const updated: StoredBooking = { ...stored, status: cancelled.status, updatedAt: cancelled.updatedAt };
-      await this.#store.bookings.put(updated);
-      await this.#audit.record({ actorId: actor.id, tool: "cancel_booking", action: "commit", adapterId: adapter.id, providerId: stored.providerId, args, idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started });
-
-      return {
-        status: "ok" as const,
-        booking: bookingView(updated),
-        fee_charged: feeCharged ? { amount: feeCharged.amount, currency: feeCharged.currency } : null,
-        // Stated plainly rather than hidden: the cancellation stood, but the
-        // business is still owed the fee.
-        fee_uncollected: feeDue && !feeCharged ? { amount: feeDue.amount, currency: feeDue.currency, reason: feeError } : null,
-      };
+    const rederived = termsHash({
+      action: "cancel",
+      providerId: stored.providerId,
+      serviceId: stored.serviceId,
+      startsAtMs: stored.startsAt.getTime(),
+      endsAtMs: stored.endsAt.getTime(),
+      locationId: stored.locationId,
+      providerSlotRef: null,
+      moneyKind: feeDue ? "fee" : "none",
+      amountMinor: feeDue?.amount ?? null,
+      currency: feeDue?.currency ?? null,
+      cancellationPolicy: policy,
+      breakdown: feeDue ? [{ label: "Cancellation fee", amount: feeDue }] : [],
+      nonRefundable: feeDue !== null,
+      recurrence: { kind: "one_off" },
     });
+    if (rederived !== token.terms) {
+      throw new PorterError("CONFIRMATION_STALE", "The cancellation fee changed since we showed you the summary. Ask for a fresh summary and confirm again.");
+    }
+
+    const providerKey = derivedKey(actor.id, adapter.id, stored.providerId, args.idempotency_key, "cancel");
+    await commit.attempt.beforeWrite({ adapterId: adapter.id, providerId: stored.providerId, providerOperation: "cancel", idempotencyKey: providerKey, providerBookingRef: stored.providerBookingRef });
+    const cancelled = await adapter.cancelBooking(
+      {
+        bookingRef: stored.providerBookingRef,
+        providerId: stored.providerId,
+        idempotencyKey: providerKey,
+        ...(args.reason ? { reason: args.reason } : {}),
+      },
+      this.#ctx(actor, adapter, signal),
+    );
+    const updated: StoredBooking = { ...stored, status: cancelled.status, updatedAt: cancelled.updatedAt };
+    await this.#store.bookings.put(updated);
+
+    // Cancel first, then settle the money.
+    //
+    // The order matters. If the fee charge fails, the appointment is still
+    // cancelled — which is what the user asked for and confirmed — and the
+    // unpaid fee is a debt to chase, not a reason to leave them booked in.
+    // Doing it the other way round could take a fee and then fail to
+    // cancel, which is the worse failure by far.
+    let feeCharged: Money | null = null;
+    let feeError: string | null = null;
+    if (feeDue) {
+      try {
+        if (!this.#payments) throw new PorterError("UNSUPPORTED_CAPABILITY", "Fee collection is not switched on.");
+        await this.#charge(actor, stored, feeDue, "cancellation_fee", derivedKey(actor.id, adapter.id, stored.providerId, args.idempotency_key, "fee"));
+        feeCharged = feeDue;
+      } catch (error) {
+        // Transport and persistence failures can conceal a successful charge.
+        // Keep the request uncertain instead of reporting a debt to pay twice.
+        if (!PorterError.is(error) || !["PAYMENT_REQUIRED", "UNSUPPORTED_CAPABILITY"].includes(error.code) || error.details.reason === "authentication_required") throw error;
+        feeError = error.code;
+        this.#log.warn("cancellation_fee_uncollected", { code: feeError, adapter: adapter.id });
+      }
+    }
+
+    // A deposit already paid is refunded when no fee is due.
+    if (!feeDue && stored.paidMinor > 0 && this.#payments) {
+      const paid = await this.#store.payments.listForBooking(actor.id, stored.id);
+      for (const record of paid.filter((r) => r.status === "succeeded" && r.kind !== "cancellation_fee")) {
+        try {
+          const refund = await this.#payments.refund({
+            paymentId: record.gatewayPaymentRef,
+            amount: { amount: record.amountMinor, currency: record.currency },
+            idempotencyKey: derivedKey(actor.id, adapter.id, stored.providerId, args.idempotency_key, `refund:${record.id}`),
+            reason: "requested_by_customer",
+          });
+          if (refund.status !== "succeeded") {
+            throw new PorterError("IDEMPOTENCY_UNCERTAIN", "The refund has not completed. Check its status before attempting another refund.");
+          }
+          await this.#store.payments.put({ ...record, status: "refunded" });
+        } catch (error) {
+          this.#log.warn("refund_failed", { code: PorterError.is(error) ? error.code : "unknown" });
+          throw error;
+        }
+      }
+    }
+
+    await this.#audit.record({ actorId: actor.id, tool: "cancel_booking", action: "commit", adapterId: adapter.id, providerId: stored.providerId, args, idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started });
+
+    return {
+      status: "ok" as const,
+      booking: bookingView(updated),
+      fee_charged: feeCharged ? { amount: feeCharged.amount, currency: feeCharged.currency } : null,
+      // Stated plainly rather than hidden: the cancellation stood, but the
+      // business is still owed the fee.
+      fee_uncollected: feeDue && !feeCharged ? { amount: feeDue.amount, currency: feeDue.currency, reason: feeError } : null,
+    };
   }
 
   /**
@@ -704,6 +769,13 @@ export class BookingEngine {
    * that moves between the summary and the commit voids the confirmation.
    */
   async payOrDeposit(actor: Actor, args: PayArgs, signal: AbortSignal): Promise<MaybeConfirm<PayResult>> {
+    const token = args.confirmation_token;
+    if (!token) return this.#payOrDeposit(actor, args, signal);
+    return this.#mutateBooking(actor, args.booking_id, "pay_or_deposit", args.idempotency_key, { booking_id: args.booking_id },
+      (attempt) => this.#payOrDeposit(actor, args, signal, { token, attempt }));
+  }
+
+  async #payOrDeposit(actor: Actor, args: PayArgs, signal: AbortSignal, commit?: ConfirmedMutation): Promise<MaybeConfirm<PayResult>> {
     const started = this.#clock.nowMs();
     const stored = await this.#requireBooking(actor, args.booking_id);
     const adapter = this.#requireAdapter(stored.adapterId);
@@ -722,7 +794,7 @@ export class BookingEngine {
     }
     const policy = await this.#policy(actor, adapter, stored, signal);
 
-    if (!args.confirmation_token) {
+    if (!commit) {
       const envelope = this.#envelope({
         action: "pay",
         actor,
@@ -739,56 +811,62 @@ export class BookingEngine {
         providerId: stored.providerId,
         serviceId: stored.serviceId,
         startsAtMs: stored.startsAt.getTime(),
+        endsAtMs: stored.endsAt.getTime(),
+        locationId: stored.locationId,
+        providerSlotRef: null,
         // A deposit is normally forfeited on a late cancellation, so the user
         // is told before they commit, not after.
         nonRefundable: due.kind === "deposit" && policy.known && policy.feeAmount !== null,
-        data: { booking_id: args.booking_id, kind: due.kind, amount: due.amount.amount },
+        data: { booking_id: args.booking_id },
       });
       await this.#audit.record({ actorId: actor.id, tool: "pay_or_deposit", action: "quote", adapterId: adapter.id, providerId: stored.providerId, args, outcome: "ok", startedAtMs: started });
       return envelope;
     }
 
-    const token = decodeConfirmationToken(this.#signer, args.confirmation_token, this.#clock);
-    this.#assertToken(token, actor, "pay");
+    const token = decodeConfirmationToken(this.#signer, commit.token, this.#clock);
+    this.#assertToken(token, actor, "pay", { booking_id: args.booking_id });
 
     // The idempotency payload is the caller's own arguments, never derived
     // state. Hashing the outstanding amount would make a legitimate replay
     // look like a conflict, because the first call changes that amount.
     // The confirmation token already binds the price that was agreed.
-    return this.#idem.run(actor.id, "pay_or_deposit", args.idempotency_key, { booking: args.booking_id }, async () => {
-      await this.#consume(token);
+    await this.#consume(token);
 
-      const rederived = termsHash({
-        action: "pay",
-        providerId: stored.providerId,
-        serviceId: stored.serviceId,
-        startsAtMs: stored.startsAt.getTime(),
-        amountMinor: due.amount.amount,
-        currency: due.amount.currency,
-        feeMinor: policy.feeAmount?.amount ?? null,
-        nonRefundable: due.kind === "deposit" && policy.known && policy.feeAmount !== null,
-        recurrence: { kind: "one_off" },
-      });
-      if (rederived !== token.terms) {
-        throw new PorterError("CONFIRMATION_STALE", "The amount changed since we showed you the summary. Ask for a fresh summary and confirm again.");
-      }
-
-      const result = await this.#charge(actor, stored, due.amount, due.kind, derivedKey(args.idempotency_key, "charge"));
-
-      const updated: StoredBooking = { ...stored, paidMinor: stored.paidMinor + due.amount.amount, updatedAt: this.#clock.now() };
-      await this.#store.bookings.put(updated);
-
-      await this.#audit.record({ actorId: actor.id, tool: "pay_or_deposit", action: "commit", adapterId: adapter.id, providerId: stored.providerId, args, idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started });
-
-      return {
-        status: "ok" as const,
-        payment_id: result.paymentId,
-        kind: due.kind,
-        amount: { amount: due.amount.amount, currency: due.amount.currency },
-        amount_outstanding: Math.max(0, (stored.priceMinor ?? 0) - updated.paidMinor),
-        booking_id: stored.id,
-      };
+    const rederived = termsHash({
+      action: "pay",
+      providerId: stored.providerId,
+      serviceId: stored.serviceId,
+      startsAtMs: stored.startsAt.getTime(),
+      endsAtMs: stored.endsAt.getTime(),
+      locationId: stored.locationId,
+      providerSlotRef: null,
+      moneyKind: due.kind === "deposit" ? "deposit" : "total",
+      amountMinor: due.amount.amount,
+      currency: due.amount.currency,
+      cancellationPolicy: policy,
+      breakdown: [{ label: due.kind === "deposit" ? "Deposit" : stored.serviceName, amount: due.amount }],
+      nonRefundable: due.kind === "deposit" && policy.known && policy.feeAmount !== null,
+      recurrence: { kind: "one_off" },
     });
+    if (rederived !== token.terms) {
+      throw new PorterError("CONFIRMATION_STALE", "The amount changed since we showed you the summary. Ask for a fresh summary and confirm again.");
+    }
+
+    const result = await this.#charge(actor, stored, due.amount, due.kind, derivedKey(actor.id, adapter.id, stored.providerId, args.idempotency_key, "charge"), commit.attempt);
+
+    const updated: StoredBooking = { ...stored, paidMinor: stored.paidMinor + due.amount.amount, updatedAt: this.#clock.now() };
+    await this.#store.bookings.put(updated);
+
+    await this.#audit.record({ actorId: actor.id, tool: "pay_or_deposit", action: "commit", adapterId: adapter.id, providerId: stored.providerId, args, idempotencyKey: args.idempotency_key, confirmationJti: token.jti, outcome: "ok", startedAtMs: started });
+
+    return {
+      status: "ok" as const,
+      payment_id: result.paymentId,
+      kind: due.kind,
+      amount: { amount: due.amount.amount, currency: due.amount.currency },
+      amount_outstanding: Math.max(0, (stored.priceMinor ?? 0) - updated.paidMinor),
+      booking_id: stored.id,
+    };
   }
 
   /** What the user has actually paid, for display and for receipts. */
@@ -849,9 +927,9 @@ export class BookingEngine {
 
   /** Terms 4.3(f): purge everything tied to a user on revocation or request. */
   async deleteUserData(actor: Actor): Promise<{ bookings: number; idempotency: number; payments: number }> {
+    const payments = await this.#store.payments.deleteAllForUser(actor.id);
     const bookings = await this.#store.bookings.deleteAllForUser(actor.id);
     const idempotency = await this.#store.idempotency.deleteAllForUser(actor.id);
-    const payments = await this.#store.payments.deleteAllForUser(actor.id);
     await this.#store.paymentProfiles.deleteAllForUser(actor.id);
     // Destroying the per-user key renders any remaining ciphertext unreadable.
     await this.#store.keys.destroy(actor.id);
@@ -861,6 +939,27 @@ export class BookingEngine {
 
   // --------------------------------------------------------------- internals
 
+  async #mutateBooking<T>(
+    actor: Actor,
+    bookingId: string,
+    tool: string,
+    key: string,
+    request: unknown,
+    mutate: (attempt: WriteAttempt) => Promise<T>,
+  ): Promise<T> {
+    return this.#idem.run(actor.id, tool, key, request, async (attempt) => {
+      // Preserve NOT_FOUND for missing or unowned bookings. Discard this
+      // snapshot: all state used to decide the mutation is reread under guard.
+      await this.#requireBooking(actor, bookingId);
+      const acquired = await this.#store.bookingMutations.acquire(actor.id, bookingId, tool, key);
+      if (!acquired) {
+        throw new PorterError("IDEMPOTENCY_UNCERTAIN", "Another change to this booking is processing or needs to be checked. Check its status before submitting another change.");
+      }
+      // The caller reads mutable booking/payment state only after acquiring.
+      return mutate(attempt);
+    }, () => this.#store.bookingMutations.release(actor.id, bookingId, tool, key));
+  }
+
   /**
    * Run a charge through the gateway and record it.
    *
@@ -869,7 +968,7 @@ export class BookingEngine {
    * the bank demands 3-D Secure nobody can complete it on their behalf. That
    * comes back as a distinct, explainable error rather than a generic decline.
    */
-  async #charge(actor: Actor, stored: StoredBooking, amount: Money, kind: ChargeKind, idempotencyKey: string) {
+  async #charge(actor: Actor, stored: StoredBooking, amount: Money, kind: ChargeKind, idempotencyKey: string, attempt?: WriteAttempt) {
     const profile = await this.#store.paymentProfiles.get(actor.id);
     if (!profile) {
       throw new PorterError("PAYMENT_REQUIRED", "There is no payment method saved. Add one, then try again.", {
@@ -879,6 +978,7 @@ export class BookingEngine {
 
     const destination = (await this.#payouts?.lookup(stored.adapterId, stored.providerId)) ?? undefined;
 
+    await attempt?.beforeWrite({ adapterId: this.#payments!.id, providerId: stored.providerId, providerOperation: "charge", idempotencyKey, providerBookingRef: stored.providerBookingRef });
     const result = await this.#payments!.charge({
       userId: actor.id,
       bookingId: stored.id,
@@ -908,14 +1008,19 @@ export class BookingEngine {
     } satisfies PaymentRecord);
 
     if (result.status === "requires_action") {
-      throw new PorterError("PAYMENT_REQUIRED", "The bank needs the cardholder to approve this payment. Ask the user to confirm it with their bank, then try again.", {
+      const error = new PorterError("PAYMENT_REQUIRED", "The bank needs the cardholder to approve this payment. Ask the user to confirm it with their bank. Check its status before submitting another payment.", {
         details: { reason: "authentication_required", ...(result.actionUrl ? { approval_url: result.actionUrl } : {}) },
       });
+      // Authentication can still settle this charge later. Keep the request
+      // and booking guard unresolved until its provider status is reconciled.
+      throw error;
     }
     if (result.status === "failed") {
-      throw new PorterError("PAYMENT_REQUIRED", explainFailure(result.reason), {
+      const error = new PorterError("PAYMENT_REQUIRED", explainFailure(result.reason), {
         details: { reason: result.reason ?? "gateway_error" },
       });
+      if (attempt) return attempt.finishWithError(error);
+      throw error;
     }
     return result;
   }
@@ -978,7 +1083,12 @@ export class BookingEngine {
       { providerId: token.p, serviceId: token.s, startsAt, ...(token.r ? { providerSlotRef: token.r } : {}) },
       this.#ctx(actor, adapter, signal),
     );
-    if (fresh) return fresh;
+    if (fresh) {
+      if (fresh.providerId !== token.p || fresh.locationId !== token.l || fresh.serviceId !== token.s || fresh.startsAt.getTime() !== token.t) {
+        throw new PorterError("CONFIRMATION_STALE", "That appointment changed. Search again and confirm the new details.");
+      }
+      return fresh;
+    }
 
     let alternatives: SlotView[] = [];
     try {
@@ -1046,6 +1156,9 @@ export class BookingEngine {
     providerId: string;
     serviceId: string;
     startsAtMs: number;
+    endsAtMs: number;
+    locationId: string;
+    providerSlotRef: string | null;
     nonRefundable?: boolean;
     recurrence?: Recurrence;
     data: Record<string, unknown>;
@@ -1058,9 +1171,14 @@ export class BookingEngine {
       providerId: input.providerId,
       serviceId: input.serviceId,
       startsAtMs: input.startsAtMs,
+      endsAtMs: input.endsAtMs,
+      locationId: input.locationId,
+      providerSlotRef: input.providerSlotRef,
+      moneyKind: input.moneyKind,
       amountMinor: input.total?.amount ?? null,
       currency: input.total?.currency ?? null,
-      feeMinor: input.policy.feeAmount?.amount ?? null,
+      cancellationPolicy: input.policy,
+      breakdown: input.breakdown,
       nonRefundable,
       recurrence,
     });
@@ -1073,7 +1191,7 @@ export class BookingEngine {
       jti: newId("cnf"),
       exp: expiresAt.getTime(),
       terms,
-      data: input.data,
+      data: { requestHash: stableHash(input.data) },
     });
 
     return buildEnvelope(
@@ -1091,12 +1209,15 @@ export class BookingEngine {
     );
   }
 
-  #assertToken(token: { act: string; uid: string }, actor: Actor, expected: string): void {
+  #assertToken(token: { act: string; uid: string; data: Record<string, unknown> }, actor: Actor, expected: string, request: unknown): void {
     if (token.act !== expected) {
       throw new PorterError("INVALID_REQUEST", "That confirmation was for a different action. Ask for a fresh summary.");
     }
     if (token.uid !== actor.id) {
       throw new PorterError("UNAUTHENTICATED", "That confirmation belongs to a different account.");
+    }
+    if (token.data?.requestHash !== stableHash(request)) {
+      throw new PorterError("CONFIRMATION_STALE", "That confirmation was for a different request. Ask for a fresh summary and confirm again.");
     }
   }
 
@@ -1117,8 +1238,50 @@ function mustEnv(name: string): string {
   return value;
 }
 
-function derivedKey(key: string, suffix: string): string {
-  return `${key}:${suffix}`;
+function assertActiveBooking(booking: StoredBooking): void {
+  if (booking.status !== "pending" && booking.status !== "confirmed") {
+    throw new PorterError("POLICY_BLOCKED", "That appointment is no longer active, so it cannot be moved or cancelled.");
+  }
+}
+
+/** Square accepts at most 45 characters. Tuple hashing prevents cross-account collisions. */
+function derivedKey(actorId: string, adapterId: string, providerId: string, key: string, operation: string): string {
+  return `p_${Buffer.from(stableHash([actorId, adapterId, providerId, operation, key]), "hex").toString("base64url")}`;
+}
+
+function createRequest(args: CreateBookingArgs) {
+  return { slot_id: args.slot_id ?? null, quote_id: args.quote_id ?? null, customer: args.customer_details, notes: args.notes ?? null };
+}
+
+function rescheduleRequest(args: RescheduleArgs) {
+  return { booking_id: args.booking_id, new_slot_id: args.new_slot_id };
+}
+
+function rescheduleConfirmationRequest(args: RescheduleArgs, booking: StoredBooking) {
+  return {
+    ...rescheduleRequest(args),
+    source: {
+      updatedAtMs: booking.updatedAt.getTime(),
+      startsAtMs: booking.startsAt.getTime(),
+      endsAtMs: booking.endsAt.getTime(),
+      status: booking.status,
+      priceMinor: booking.priceMinor,
+      currency: booking.currency,
+      depositMinor: booking.depositMinor,
+      paidMinor: booking.paidMinor,
+    },
+  };
+}
+
+function cancelRequest(args: CancelArgs) {
+  return { booking_id: args.booking_id, reason: args.reason ?? null };
+}
+
+function bookingBreakdown(price: Money | null, deposit: Money | null): LineItem[] {
+  return [
+    ...(price ? [{ label: "Service", amount: price }] : []),
+    ...(deposit ? [{ label: "Deposit due now", amount: deposit }] : []),
+  ];
 }
 
 function assertValidRange(from: Date, to: Date): void {

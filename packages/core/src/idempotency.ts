@@ -1,6 +1,6 @@
 import { PorterError, stableHash, type Clock } from "@porter/shared";
 import { decryptWithKey, encryptWithKey } from "./crypto.js";
-import type { IdempotencyStore, KeyStore } from "./ports.js";
+import type { IdempotencyOperation, IdempotencyStore, KeyStore } from "./ports.js";
 
 const DEFAULT_TTL_MS = 30 * 24 * 60 * 60_000; // 30 days
 
@@ -8,15 +8,25 @@ export interface IdempotencyOptions {
   readonly ttlMs?: number;
 }
 
+export interface WriteAttempt {
+  /** Must succeed durably before sending the first external write. */
+  beforeWrite(operation: IdempotencyOperation): Promise<void>;
+  /** Store a definitive failure returned by the provider, without resending it on replay. */
+  finishWithError(error: PorterError): Promise<never>;
+}
+
+type StoredOutcome<T> =
+  | { readonly version: 1; readonly kind: "result"; readonly value: T }
+  | { readonly version: 1; readonly kind: "error"; readonly error: ReturnType<PorterError["toPublic"]> };
+
 /**
  * Idempotency for every write call.
- *
- * Three cases, and the middle one is the one that catches real bugs:
  *
  *   same key, same payload  -> replay the stored response, call nothing
  *   same key, different payload -> hard error, because the caller has reused a
  *                                  key for a different action
  *   key already in flight   -> tell the agent to retry shortly
+ *   write possibly sent     -> require reconciliation, never send it again
  *
  * The payload itself is never stored; only its hash. The response is stored
  * encrypted under a per-user key (see crypto.ts), so a deletion request
@@ -38,20 +48,33 @@ export class Idempotency {
   /**
    * Run `fn` at most once for a given (user, tool, key).
    *
-   * `key` may be undefined for read-only tools, in which case `fn` runs
-   * directly with no bookkeeping.
+   * A durable marker precedes external writes. Expiry is retention metadata,
+   * never permission to repeat a mutation whose outcome is unknown.
    */
   async run<T>(
     userId: string,
     tool: string,
     key: string | undefined,
     args: unknown,
-    fn: () => Promise<T>,
+    fn: (attempt: WriteAttempt) => Promise<T>,
+    /** Release dependent guards only while this reservation still owns its identity. */
+    onSafeRelease?: () => Promise<void>,
   ): Promise<T> {
-    if (key === undefined || key.trim().length === 0) return fn();
+    if (key === undefined || key.trim().length === 0) {
+      throw new PorterError("INVALID_REQUEST", "A request id is required before making a change.");
+    }
 
     const argsHash = stableHash(args);
     const now = this.#clock.now();
+    const releaseGuard = async (): Promise<void> => {
+      try {
+        await onSafeRelease?.();
+      } catch (error) {
+        // Lost cleanup acknowledgment must not permit a new reservation to
+        // reuse the same identity before an old cleanup can delete its guard.
+        throw uncertainOutcome(tool, error);
+      }
+    };
 
     const existing = await this.#store.reserve({
       userId,
@@ -72,29 +95,85 @@ export class Idempotency {
         );
       }
       if (existing.state === "in_flight") {
+        if (existing.expiresAt.getTime() <= this.#clock.nowMs()) throw uncertainOutcome(tool);
         throw new PorterError(
           "IDEMPOTENCY_IN_FLIGHT",
           "That request is still being processed. Try again in a few seconds.",
           { retryAfterSeconds: 3, details: { tool } },
         );
       }
+      if (existing.state === "uncertain") throw uncertainOutcome(tool);
       if (existing.responseCipher) {
         const dek = await this.#keys.getOrCreate(userId);
-        return JSON.parse(decryptWithKey(dek, existing.responseCipher)) as T;
+        const outcome = JSON.parse(decryptWithKey(dek, existing.responseCipher)) as StoredOutcome<T>;
+        if (outcome.version !== 1) throw uncertainOutcome(tool);
+        if (outcome.kind !== "result" && outcome.kind !== "error") throw uncertainOutcome(tool);
+        // A crash after completing the result may leave its guard behind.
+        await releaseGuard();
+        if (outcome.kind === "error") {
+          throw new PorterError(outcome.error.code, outcome.error.message, outcome.error);
+        }
+        return outcome.value;
       }
-      // Completed with no stored body should not happen; fall through and rerun.
+      // Missing durable result data is corruption, never permission to write again.
+      throw uncertainOutcome(tool);
     }
 
-    try {
-      const result = await fn();
+    let writeAttempted = false;
+    let finalizedError: PorterError | undefined;
+    const complete = async (outcome: StoredOutcome<T>): Promise<void> => {
       const dek = await this.#keys.getOrCreate(userId);
-      await this.#store.complete(userId, tool, key, encryptWithKey(dek, JSON.stringify(result)));
+      await this.#store.complete(userId, tool, key, encryptWithKey(dek, JSON.stringify(outcome)));
+    };
+    try {
+      const result = await fn({
+        beforeWrite: async (operation) => {
+          // Set this before awaiting: a lost DB acknowledgment can mean that
+          // the marker was committed. A failed marker must fail closed.
+          writeAttempted = true;
+          await this.#store.markUncertain(userId, tool, key, operation);
+        },
+        finishWithError: async (error) => {
+          await complete({ version: 1, kind: "error", error: error.toPublic() });
+          finalizedError = error;
+          throw error;
+        },
+      });
+      await complete({ version: 1, kind: "result", value: result });
+      await releaseGuard();
       return result;
     } catch (error) {
-      // A failed call must not burn the key. The agent should be able to retry
-      // the same request with the same key after a transient failure.
+      if (finalizedError && error === finalizedError) {
+        await releaseGuard();
+        throw error;
+      }
+      // Only validation/read failures are safe to retry automatically. A
+      // timeout or local storage failure after a write may hide a success.
+      // Generic adapter error codes do not prove that nothing was applied:
+      // adapters may have already made several downstream calls. Only a
+      // verified terminal response may opt into finishWithError above.
+      if (writeAttempted) throw uncertainOutcome(tool, error);
+      // Release while this reservation still blocks another use of its key.
+      await releaseGuard();
       await this.#store.release(userId, tool, key);
       throw error;
     }
   }
+}
+
+function uncertainOutcome(tool: string, cause?: unknown): PorterError {
+  const awaitingAuthentication = PorterError.is(cause) && cause.code === "PAYMENT_REQUIRED" && cause.details.reason === "authentication_required";
+  return new PorterError(
+    "IDEMPOTENCY_UNCERTAIN",
+    awaitingAuthentication
+      ? "The bank needs the cardholder to approve this payment. Do not submit another payment. Check its status after approval."
+      : "The result of this request needs to be checked. Do not submit it with a new request id. Check your bookings or contact support before trying again.",
+    {
+      details: {
+        tool,
+        ...(awaitingAuthentication ? { reason: "authentication_required", ...(typeof cause.details.approval_url === "string" ? { approval_url: cause.details.approval_url } : {}) } : {}),
+      },
+      ...(cause === undefined ? {} : { cause }),
+    },
+  );
 }

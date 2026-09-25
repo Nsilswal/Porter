@@ -17,5 +17,9 @@
     "@porter/payments-stripe": "workspace:*",
     "@porter/adapter-web": "workspace:*",
     "@porter/adapter-square-public": "workspace:*"
+  },
+  "devDependencies": {
+    "pg": "^8.13.1",
+    "@types/pg": "^8.11.10"
   }
 }

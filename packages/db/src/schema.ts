@@ -1,6 +1,7 @@
 import {
   bigserial,
   boolean,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -10,15 +11,15 @@ import {
   timestamp,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
+import type { AuditRecord, BookingStatus, IdempotencyOperation, IdempotencyState, PaymentRecord } from "@porter/core";
 
 /**
  * Postgres schema (Railway Postgres, via Drizzle).
  *
- * Two things in here are compliance decisions, not modelling preferences:
+ * Persistent booking data and the security metadata needed to protect it.
  *
  *  - `auditLog` stores an argument HASH and a list of disclosed field NAMES.
- *    It holds no personal data, so it survives a deletion request under
- *    Connector Terms 4.3(f) while still satisfying the records duty in 4.3(g).
+ *    Actor identifiers remain pseudonymous data subject to retention policy.
  *
  *  - `idempotencyKeys.responseCipher` is encrypted under a per-user key held
  *    in `userKeys`. Deleting that key renders every stored response
@@ -35,7 +36,7 @@ export const users = pgTable("users", {
 /** Per-user data encryption keys. Destroying a row is the delete mechanism. */
 export const userKeys = pgTable("user_keys", {
   userId: text("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
-  key: text("key").notNull(), // base64url, wrapped by the KMS master key in production
+  key: text("key").notNull(), // AES-256-GCM envelope, wrapped by the deployment encryption key
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -60,7 +61,7 @@ export const bookings = pgTable(
     userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     adapterId: text("adapter_id").notNull(),
     providerBookingRef: text("provider_booking_ref").notNull(),
-    status: text("status").notNull(),
+    status: text("status").$type<BookingStatus>().notNull(),
     startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
     endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
     providerId: text("provider_id").notNull(),
@@ -80,6 +81,7 @@ export const bookings = pgTable(
   (t) => ({
     byUser: index("bookings_user_starts_idx").on(t.userId, t.startsAt),
     byRef: uniqueIndex("bookings_adapter_ref_idx").on(t.adapterId, t.providerBookingRef),
+    byOwnerId: uniqueIndex("bookings_user_id_idx").on(t.userId, t.id),
   }),
 );
 
@@ -87,18 +89,21 @@ export const payments = pgTable(
   "payments",
   {
     id: text("id").primaryKey(),
-    bookingId: text("booking_id").notNull().references(() => bookings.id, { onDelete: "cascade" }),
+    bookingId: text("booking_id").notNull(),
     userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
     amountMinor: integer("amount_minor").notNull(),
     currency: text("currency").notNull(),
-    kind: text("kind").notNull(), // deposit | total | cancellation_fee
-    status: text("status").notNull(),
+    kind: text("kind").$type<PaymentRecord["kind"]>().notNull(),
+    status: text("status").$type<PaymentRecord["status"]>().notNull(),
     gatewayId: text("gateway_id").notNull(),
     /** The gateway's own id, e.g. a Stripe PaymentIntent. Not card data. */
     gatewayPaymentRef: text("gateway_payment_ref").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => ({ byBooking: index("payments_booking_idx").on(t.userId, t.bookingId) }),
+  (t) => ({
+    byBooking: index("payments_booking_idx").on(t.userId, t.bookingId),
+    bookingOwner: foreignKey({ columns: [t.userId, t.bookingId], foreignColumns: [bookings.userId, bookings.id] }).onDelete("cascade"),
+  }),
 );
 
 /**
@@ -137,8 +142,9 @@ export const idempotencyKeys = pgTable(
     key: text("key").notNull(),
     /** Hash only. The request payload itself is never stored. */
     argsHash: text("args_hash").notNull(),
-    state: text("state").notNull(),
+    state: text("state").$type<IdempotencyState>().notNull(),
     responseCipher: text("response_cipher"),
+    operation: jsonb("operation").$type<IdempotencyOperation>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
@@ -160,7 +166,7 @@ export const confirmationTokens = pgTable(
 );
 
 /**
- * Append-only audit log. No personal data. See the note at the top of this file.
+ * Append-only audit log. Contains pseudonymous identifiers, never customer field values.
  */
 export const auditLog = pgTable(
   "audit_log",
@@ -175,11 +181,11 @@ export const auditLog = pgTable(
     argsHash: text("args_hash").notNull(),
     idempotencyKey: text("idempotency_key"),
     confirmationJti: text("confirmation_jti"),
-    outcome: text("outcome").notNull(),
+    outcome: text("outcome").$type<AuditRecord["outcome"]>().notNull(),
     errorCode: text("error_code"),
     latencyMs: integer("latency_ms").notNull(),
     /** Customer field NAMES disclosed downstream. Never values. */
-    disclosedFields: jsonb("disclosed_fields").$type<string[]>().notNull().default([]),
+    disclosedFields: jsonb("disclosed_fields").$type<AuditRecord["disclosedFields"]>().notNull().default([]),
     immutable: boolean("immutable").notNull().default(true),
   },
   (t) => ({ byActor: index("audit_actor_at_idx").on(t.actorId, t.at) }),
@@ -194,4 +200,26 @@ export const providersCache = pgTable(
     fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({ pk: primaryKey({ columns: [t.adapterId, t.providerId] }) }),
+);
+
+/** Contains an encrypted canary so a wrong deployment key fails at startup. */
+export const storeMetadata = pgTable("store_metadata", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});
+
+/** Durable ownership of a booking mutation; uncertain writes retain the guard. */
+export const bookingMutations = pgTable(
+  "booking_mutations",
+  {
+    userId: text("user_id").notNull(),
+    bookingId: text("booking_id").notNull(),
+    tool: text("tool").notNull(),
+    key: text("key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.userId, t.bookingId] }),
+    bookingOwner: foreignKey({ columns: [t.userId, t.bookingId], foreignColumns: [bookings.userId, bookings.id] }).onDelete("cascade"),
+  }),
 );
