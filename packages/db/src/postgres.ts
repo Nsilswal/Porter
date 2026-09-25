@@ -58,9 +58,12 @@ export async function createPostgresStore(options: PostgresStoreOptions): Promis
               eq(schema.bookings.userId, booking.userId),
               eq(schema.bookings.adapterId, booking.adapterId),
               eq(schema.bookings.providerBookingRef, booking.providerBookingRef),
+              eq(schema.bookings.providerId, booking.providerId),
+              eq(schema.bookings.locationId, booking.locationId),
+              eq(schema.bookings.serviceId, booking.serviceId),
             ),
           }).returning({ id: schema.bookings.id });
-          if (!rows.length) throw new Error("A booking's owner and provider reference cannot change");
+          if (!rows.length) throw new Error("A booking's owner and provider identity cannot change");
         });
       },
       async get(userId, bookingId) {

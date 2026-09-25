@@ -90,7 +90,8 @@ export interface EngineDeps {
 }
 
 export interface SearchArgs {
-  readonly category: string;
+  readonly category?: string;
+  readonly business_name?: string;
   readonly location?: string;
   readonly time_window?: { from?: string; to?: string };
   readonly budget_minor?: number;
@@ -104,6 +105,8 @@ export interface AvailabilityArgs {
   readonly from: string;
   readonly to: string;
   readonly limit?: number;
+  /** An owned Porter appointment when looking for rescheduling times. */
+  readonly booking_id?: string;
 }
 
 export interface QuoteArgs {
@@ -242,8 +245,11 @@ export class BookingEngine {
     const started = this.#clock.nowMs();
     this.#limiter.check(actor.id);
 
-    const categories = resolveCategory(args.category);
-    if (categories.length === 0) {
+    const category = args.category?.trim();
+    const businessName = args.business_name?.trim();
+    if (!category && !businessName) throw new PorterError("INVALID_REQUEST", "Name a business or the service you need.");
+    const categories = category ? resolveCategory(category) : [];
+    if (category && categories.length === 0) {
       await this.#audit.record({ actorId: actor.id, tool: "search_providers", action: "search", args, outcome: "error", errorCode: "INVALID_REQUEST", startedAtMs: started });
       return { providers: [], unmatched_category: true };
     }
@@ -256,13 +262,14 @@ export class BookingEngine {
     const out: ProviderView[] = [];
     for (const adapter of this.#adapters.values()) {
       const relevant = categories.filter((c) => adapter.capabilities.categories.includes(c));
-      if (relevant.length === 0) continue;
+      if (category && relevant.length === 0) continue;
       try {
         this.#limiter.check(actor.id, adapter.id);
         const results = await adapter.searchProviders(
           {
             categories: relevant,
             limit,
+            ...(businessName ? { text: businessName } : {}),
             ...(args.location ? { near: { postalCode: args.location } } : {}),
             ...(args.radius_km !== undefined ? { radiusKm: args.radius_km } : {}),
             ...(timeWindow ? { timeWindow } : {}),
@@ -271,6 +278,9 @@ export class BookingEngine {
           this.#ctx(actor, adapter, signal),
         );
         for (const r of results) {
+          // Some adapters use query.text for services. A named-business request
+          // must never quietly substitute a different matching service provider.
+          if (businessName && !sanitize(r.provider.name).toLocaleLowerCase("en-US").includes(businessName.toLocaleLowerCase("en-US"))) continue;
           const next = r.nextAvailable ? slotView(this.#encodeSlot(adapter.id, r.nextAvailable), r.nextAvailable) : null;
           out.push(providerView(r.provider, r.services, next));
         }
@@ -288,20 +298,27 @@ export class BookingEngine {
 
   async getAvailability(actor: Actor, args: AvailabilityArgs, signal: AbortSignal): Promise<{ slots: SlotView[] }> {
     const started = this.#clock.nowMs();
+    const booking = args.booking_id !== undefined ? await this.#requireBooking(actor, args.booking_id) : undefined;
+    if (booking) {
+      assertActiveBooking(booking);
+      if (booking.providerId !== args.provider_id || booking.serviceId !== args.service_id) throw new PorterError("INVALID_REQUEST", "Choose a new time for the same service at the same salon.");
+    }
     const adapter = this.#adapterForProvider(args.provider_id);
+    if (booking && booking.adapterId !== adapter.id) throw new PorterError("INVALID_REQUEST", "That appointment belongs to a different booking system.");
     this.#limiter.check(actor.id, adapter.id);
 
     const from = new Date(args.from);
     const to = new Date(args.to);
     assertValidRange(from, to);
 
-    const slots = await adapter.getAvailability(
-      { providerId: args.provider_id, serviceId: args.service_id, from, to, limit: Math.min(args.limit ?? 20, 50) },
-      this.#ctx(actor, adapter, signal),
-    );
+    const query = { providerId: args.provider_id, serviceId: args.service_id, from, to, limit: Math.min(args.limit ?? 20, 50) };
+    const slots = booking && adapter.getAvailabilityForBooking
+      ? await adapter.getAvailabilityForBooking({ ...query, bookingRef: booking.providerBookingRef }, this.#ctx(actor, adapter, signal))
+      : await adapter.getAvailability(query, this.#ctx(actor, adapter, signal));
+    if (slots.some((slot) => slot.providerId !== args.provider_id || slot.serviceId !== args.service_id || (booking && slot.locationId !== booking.locationId))) throw new PorterError("ADAPTER_DOWN", "That booking system returned appointment times for a different service.");
 
     await this.#audit.record({ actorId: actor.id, tool: "get_availability", action: "read", adapterId: adapter.id, providerId: args.provider_id, args, outcome: "ok", startedAtMs: started });
-    return { slots: slots.map((s) => slotView(this.#encodeSlot(adapter.id, s), s)) };
+    return { slots: slots.map((s) => slotView(this.#encodeSlot(adapter.id, s, booking), s)) };
   }
 
   async getQuote(actor: Actor, args: QuoteArgs, signal: AbortSignal) {
@@ -372,6 +389,7 @@ export class BookingEngine {
       throw new PorterError("INVALID_REQUEST", "Pick an appointment time first, then book it.");
     }
     const slotToken = decodeSlotToken(this.#signer, args.slot_id);
+    if (slotToken.b !== undefined || slotToken.uid !== undefined) throw new PorterError("INVALID_REQUEST", "That appointment time is only for rescheduling an existing booking. Search again to create a new appointment.");
     const adapter = this.#requireAdapter(slotToken.a);
     this.#limiter.check(actor.id, adapter.id);
 
@@ -478,6 +496,7 @@ export class BookingEngine {
         endsAt: fresh.endsAt,
         customer,
         idempotencyKey: providerKey,
+        expectedTerms: { price, deposit, cancellationPolicy: policy },
         ...(fresh.providerSlotRef ? { providerSlotRef: fresh.providerSlotRef } : {}),
         ...(hold ? { holdRef: hold } : {}),
         ...(args.notes ? { notes: args.notes } : {}),
@@ -535,13 +554,27 @@ export class BookingEngine {
     if (slotToken.a !== adapter.id || slotToken.p !== stored.providerId || slotToken.s !== stored.serviceId || slotToken.l !== stored.locationId) {
       throw new PorterError("INVALID_REQUEST", "Choose a new time for the same service at the same location.");
     }
+    if ((slotToken.b !== undefined || slotToken.uid !== undefined) && (slotToken.b !== stored.id || slotToken.uid !== actor.id)) {
+      throw new PorterError("INVALID_REQUEST", "That appointment time belongs to a different booking. Find new times for this appointment.");
+    }
 
-    const policy = adapter.getServiceCancellationPolicy
+    const validation = adapter.validateReschedule ? await adapter.validateReschedule({
+      bookingRef: stored.providerBookingRef, providerId: stored.providerId, serviceId: stored.serviceId,
+      startsAt: new Date(slotToken.t), endsAt: new Date(slotToken.e),
+      ...(slotToken.r ? { providerSlotRef: slotToken.r } : {}),
+    }, this.#ctx(actor, adapter, signal)) : undefined;
+    if (validation && (!validation.bookingState || validation.bookingState.length > 512)) throw new PorterError("ADAPTER_DOWN", "The current appointment could not be verified.");
+    const policy = validation?.cancellationPolicy ?? (adapter.getServiceCancellationPolicy
       ? await this.#policyForService(actor, adapter, slotToken, signal)
-      : await this.#policy(actor, adapter, stored, signal);
+      : await this.#policy(actor, adapter, stored, signal));
+    const fresh = validation?.slot ?? await this.#recheck(actor, adapter, slotToken, signal);
+    if (fresh.providerId !== slotToken.p || fresh.locationId !== slotToken.l || fresh.serviceId !== slotToken.s || fresh.startsAt.getTime() !== slotToken.t) throw new PorterError("CONFIRMATION_STALE", "That appointment changed. Search again and confirm the new details.");
+    const confirmationRequest = {
+      ...rescheduleConfirmationRequest(args, stored),
+      ...(validation ? { providerState: validation.bookingState } : {}),
+    };
 
     if (!commit) {
-      const fresh = await this.#recheck(actor, adapter, slotToken, signal);
       const envelope = this.#envelope({
         action: "reschedule",
         actor,
@@ -561,16 +594,15 @@ export class BookingEngine {
         endsAtMs: fresh.endsAt.getTime(),
         locationId: fresh.locationId,
         providerSlotRef: fresh.providerSlotRef ?? null,
-        data: rescheduleConfirmationRequest(args, stored),
+        data: confirmationRequest,
       });
       await this.#audit.record({ actorId: actor.id, tool: "reschedule_booking", action: "quote", adapterId: adapter.id, providerId: stored.providerId, args, outcome: "ok", startedAtMs: started });
       return envelope;
     }
 
     const token = decodeConfirmationToken(this.#signer, commit.token, this.#clock);
-    this.#assertToken(token, actor, "reschedule", rescheduleConfirmationRequest(args, stored));
+    this.#assertToken(token, actor, "reschedule", confirmationRequest);
 
-    const fresh = await this.#recheck(actor, adapter, slotToken, signal);
     await this.#consume(token);
 
     const rederived = termsHash({
@@ -603,6 +635,8 @@ export class BookingEngine {
         startsAt: fresh.startsAt,
         endsAt: fresh.endsAt,
         idempotencyKey: providerKey,
+        ...(validation ? { expectedBookingState: validation.bookingState } : {}),
+        expectedTerms: { price: fresh.price ?? null, deposit: null, cancellationPolicy: policy },
         ...(fresh.providerSlotRef ? { providerSlotRef: fresh.providerSlotRef } : {}),
       },
       this.#ctx(actor, adapter, signal),
@@ -632,20 +666,31 @@ export class BookingEngine {
     assertActiveBooking(stored);
     const adapter = this.#requireAdapter(stored.adapterId);
     this.#limiter.check(actor.id, adapter.id);
+    const token = commit ? decodeConfirmationToken(this.#signer, commit.token, this.#clock) : null;
 
     // The fee is always fetched and shown BEFORE anything is cancelled.
-    const policy = await this.#policy(actor, adapter, stored, signal);
+    const validation = adapter.validateCancellation ? await adapter.validateCancellation({
+      bookingRef: stored.providerBookingRef, providerId: stored.providerId, serviceId: stored.serviceId,
+    }, this.#ctx(actor, adapter, signal)) : undefined;
+    if (validation && (!validation.bookingState || validation.bookingState.length > 512
+      || !Number.isFinite(validation.startsAt.getTime()) || !Number.isFinite(validation.endsAt.getTime())
+      || validation.endsAt.getTime() <= validation.startsAt.getTime())) throw new PorterError("ADAPTER_DOWN", "The current appointment could not be verified.");
+    const startsAt = validation?.startsAt ?? stored.startsAt;
+    const endsAt = validation?.endsAt ?? stored.endsAt;
+    const confirmationRequest = { ...cancelRequest(args), ...(validation ? { providerState: validation.bookingState } : {}) };
+    if (token) this.#assertToken(token, actor, "cancel", confirmationRequest);
+    const policy = validation?.cancellationPolicy ?? await this.#policy(actor, adapter, stored, signal);
     const feeDue = feeApplies(policy, this.#clock.now()) ? policy.feeAmount : null;
 
-    if (!commit) {
+    if (!commit || token === null) {
       const envelope = this.#envelope({
         action: "cancel",
         actor,
         summary: {
           provider: stored.providerName,
           service: stored.serviceName,
-          startsAt: stored.startsAt.toISOString(),
-          durationMinutes: Math.round((stored.endsAt.getTime() - stored.startsAt.getTime()) / 60_000),
+          startsAt: startsAt.toISOString(),
+          durationMinutes: Math.round((endsAt.getTime() - startsAt.getTime()) / 60_000),
         },
         moneyKind: feeDue ? "fee" : "none",
         total: feeDue,
@@ -653,19 +698,16 @@ export class BookingEngine {
         policy,
         providerId: stored.providerId,
         serviceId: stored.serviceId,
-        startsAtMs: stored.startsAt.getTime(),
-        endsAtMs: stored.endsAt.getTime(),
+        startsAtMs: startsAt.getTime(),
+        endsAtMs: endsAt.getTime(),
         locationId: stored.locationId,
         providerSlotRef: null,
         nonRefundable: feeDue !== null,
-        data: cancelRequest(args),
+        data: confirmationRequest,
       });
       await this.#audit.record({ actorId: actor.id, tool: "cancel_booking", action: "quote", adapterId: adapter.id, providerId: stored.providerId, args, outcome: "ok", startedAtMs: started });
       return envelope;
     }
-
-    const token = decodeConfirmationToken(this.#signer, commit.token, this.#clock);
-    this.#assertToken(token, actor, "cancel", cancelRequest(args));
 
     await this.#consume(token);
 
@@ -673,8 +715,8 @@ export class BookingEngine {
       action: "cancel",
       providerId: stored.providerId,
       serviceId: stored.serviceId,
-      startsAtMs: stored.startsAt.getTime(),
-      endsAtMs: stored.endsAt.getTime(),
+      startsAtMs: startsAt.getTime(),
+      endsAtMs: endsAt.getTime(),
       locationId: stored.locationId,
       providerSlotRef: null,
       moneyKind: feeDue ? "fee" : "none",
@@ -696,11 +738,13 @@ export class BookingEngine {
         bookingRef: stored.providerBookingRef,
         providerId: stored.providerId,
         idempotencyKey: providerKey,
+        ...(validation ? { expectedBookingState: validation.bookingState } : {}),
+        expectedCancellationPolicy: policy,
         ...(args.reason ? { reason: args.reason } : {}),
       },
       this.#ctx(actor, adapter, signal),
     );
-    const updated: StoredBooking = { ...stored, status: cancelled.status, updatedAt: cancelled.updatedAt };
+    const updated: StoredBooking = { ...stored, status: cancelled.status, startsAt: cancelled.startsAt, endsAt: cancelled.endsAt, updatedAt: cancelled.updatedAt };
     await this.#store.bookings.put(updated);
 
     // Cancel first, then settle the money.
@@ -1054,7 +1098,7 @@ export class BookingEngine {
     return row;
   }
 
-  #encodeSlot(adapterId: string, slot: Slot): string {
+  #encodeSlot(adapterId: string, slot: Slot, booking?: StoredBooking): string {
     const payload: SlotTokenPayload = {
       v: 1,
       a: adapterId,
@@ -1066,6 +1110,7 @@ export class BookingEngine {
       f: slot.fetchedAt.getTime(),
       ...(slot.providerSlotRef ? { r: slot.providerSlotRef } : {}),
       ...(slot.price ? { c: slot.price.amount, u: slot.price.currency } : {}),
+      ...(booking ? { b: booking.id, uid: booking.userId } : {}),
     };
     return this.#signer.sign(payload);
   }
@@ -1108,6 +1153,11 @@ export class BookingEngine {
   }
 
   async #describe(actor: Actor, adapter: ProviderAdapter, token: SlotTokenPayload, signal: AbortSignal): Promise<{ service: Service | null; providerName: string }> {
+    if (adapter.describeService) {
+      const described = await adapter.describeService({ providerId: token.p, serviceId: token.s }, this.#ctx(actor, adapter, signal));
+      if (described.service.id !== token.s || described.service.providerId !== token.p || described.service.locationId !== token.l) throw new PorterError("ADAPTER_DOWN", "That booking system returned details for a different service.");
+      return described;
+    }
     const results = await adapter.searchProviders({ categories: [], limit: 50 }, this.#ctx(actor, adapter, signal));
     const hit = results.find((r) => r.provider.id === token.p);
     if (!hit) return { service: null, providerName: "the business" };
@@ -1128,6 +1178,7 @@ export class BookingEngine {
         this.#ctx(actor, adapter, signal),
       );
     } catch (error) {
+      if (blocksPolicyLookup(error)) throw error;
       this.#log.warn("service_policy_lookup_failed", { adapter: adapter.id, code: PorterError.is(error) ? error.code : "unknown" });
       return { known: false, freeUntil: null, feeAmount: null, text: null };
     }
@@ -1140,6 +1191,7 @@ export class BookingEngine {
     try {
       return await adapter.getCancellationPolicy(stored.providerBookingRef, this.#ctx(actor, adapter, signal));
     } catch (error) {
+      if (blocksPolicyLookup(error)) throw error;
       this.#log.warn("policy_lookup_failed", { adapter: adapter.id, code: PorterError.is(error) ? error.code : "unknown" });
       return { known: false, freeUntil: null, feeAmount: null, text: null };
     }
@@ -1242,6 +1294,11 @@ function assertActiveBooking(booking: StoredBooking): void {
   if (booking.status !== "pending" && booking.status !== "confirmed") {
     throw new PorterError("POLICY_BLOCKED", "That appointment is no longer active, so it cannot be moved or cancelled.");
   }
+}
+
+/** Connection/ownership rejection is not evidence of an unknown policy. */
+function blocksPolicyLookup(error: unknown): boolean {
+  return PorterError.is(error) && ["NOT_FOUND", "PROVIDER_UNAVAILABLE", "UNAUTHENTICATED", "POLICY_BLOCKED"].includes(error.code);
 }
 
 /** Square accepts at most 45 characters. Tuple hashing prevents cross-account collisions. */

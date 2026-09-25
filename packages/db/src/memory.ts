@@ -32,8 +32,15 @@ class MemoryBookingStore implements BookingStore {
   ) {}
   async put(booking: StoredBooking): Promise<void> {
     const existing = this.rows.get(booking.id);
-    if (existing && (existing.userId !== booking.userId || existing.adapterId !== booking.adapterId || existing.providerBookingRef !== booking.providerBookingRef)) {
-      throw new Error("A booking's owner and provider reference cannot change");
+    if (existing && (
+      existing.userId !== booking.userId
+      || existing.adapterId !== booking.adapterId
+      || existing.providerBookingRef !== booking.providerBookingRef
+      || existing.providerId !== booking.providerId
+      || existing.locationId !== booking.locationId
+      || existing.serviceId !== booking.serviceId
+    )) {
+      throw new Error("A booking's owner and provider identity cannot change");
     }
     for (const row of this.rows.values()) {
       if (row.id !== booking.id && row.adapterId === booking.adapterId && row.providerBookingRef === booking.providerBookingRef) {

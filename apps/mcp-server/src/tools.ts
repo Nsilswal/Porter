@@ -47,12 +47,14 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "search_providers",
     title: "Find local businesses",
     description:
-      "Find local businesses that can do a job — a haircut, a manicure, a house cleaning, a plumber for a leak, someone to fix the AC. Use this first when the user wants something done but has not named a business. Returns ranked businesses with their next opening and what they charge.",
+      "Find a named business or businesses offering a service, such as a haircut, manicure, house cleaning or a plumber. Use business_name when the customer names a salon or spa; category is optional for a named business. Returns matching businesses, services and their next opening.",
     readOnly: true,
     inputSchema: z.object({
       category: z
         .string()
+        .min(1).max(200).optional()
         .describe("What the user needs, in their words: 'haircut', 'plumber', 'AC repair', 'deep clean'. Plain words work; you do not need an internal code."),
+      business_name: z.string().min(1).max(160).optional().describe("The salon or business name requested by the customer. Supply this or category."),
       location: z.string().optional().describe("Postal code or city the work is needed in."),
       time_window: z
         .object({ from: z.string().optional(), to: z.string().optional() })
@@ -70,11 +72,12 @@ export const TOOLS: readonly ToolDefinition[] = [
     name: "get_availability",
     title: "See open appointment times",
     description:
-      "See open appointment times for one business and one service. Use after search_providers, once the user has picked somewhere. Each slot comes back with a slot_id you pass to create_booking.",
+      "See open appointment times for one business and one service. For a new appointment, use after search_providers. For a reschedule, pass booking_id from list_my_bookings to get times compatible with that existing appointment; those slots can only reschedule that booking.",
     readOnly: true,
     inputSchema: z.object({
       provider_id: z.string(),
       service_id: z.string(),
+      booking_id: z.string().optional().describe("An existing Porter booking owned by this customer, when finding replacement times."),
       from: z.string().describe("ISO 8601 start of the range to look in."),
       to: z.string().describe("ISO 8601 end of the range to look in."),
       limit: z.number().int().min(1).max(50).optional(),

@@ -1,4 +1,4 @@
-import type { Logger } from "@porter/shared";
+import type { Logger, Money } from "@porter/shared";
 import type {
   Booking,
   CancellationPolicy,
@@ -47,8 +47,8 @@ export interface AdapterCapabilities {
 }
 
 /**
- * Per-call context. Adapters read no global state and never touch the database.
- * Credentials live here for the duration of one call only.
+ * Per-call context. Platform adapters read no global credentials or database.
+ * Edge routing resolves the merchant before delegating with scoped credentials.
  */
 export interface AdapterContext {
   /** Pseudonymous caller id. Never an email or a phone number. */
@@ -84,6 +84,8 @@ export interface AvailabilityQuery {
   readonly from: Date;
   readonly to: Date;
   readonly limit: number;
+  /** Optional platform staff/resource reference; filter before truncating results. */
+  readonly providerSlotRef?: string;
 }
 
 export interface QuoteRequest {
@@ -108,6 +110,8 @@ export interface CreateBookingRequest {
   readonly notes?: string;
   /** Forwarded to the platform when it supports its own idempotency. */
   readonly idempotencyKey: string;
+  /** Recheck these confirmed terms against the final provider reads before writing. */
+  readonly expectedTerms?: { readonly price: Money | null; readonly deposit: Money | null; readonly cancellationPolicy: CancellationPolicy };
 }
 
 export interface RescheduleRequest {
@@ -118,6 +122,22 @@ export interface RescheduleRequest {
   readonly endsAt: Date;
   readonly providerSlotRef?: string;
   readonly idempotencyKey: string;
+  /** Opaque provider-state hash from validateReschedule, checked again before update. */
+  readonly expectedBookingState?: string;
+  readonly expectedTerms?: CreateBookingRequest["expectedTerms"];
+}
+
+export type RescheduleValidationRequest = Omit<RescheduleRequest, "idempotencyKey" | "expectedBookingState">;
+export interface RescheduleValidation {
+  readonly slot: Slot;
+  readonly cancellationPolicy: CancellationPolicy;
+  /** Hash only: binds the existing provider booking/version to confirmation. */
+  readonly bookingState: string;
+}
+
+export interface ServiceDescription {
+  readonly service: Service;
+  readonly providerName: string;
 }
 
 export interface CancelRequest {
@@ -125,6 +145,22 @@ export interface CancelRequest {
   readonly providerId: string;
   readonly reason?: string;
   readonly idempotencyKey: string;
+  /** Opaque provider-state hash from validateCancellation, checked before cancellation. */
+  readonly expectedBookingState?: string;
+  readonly expectedCancellationPolicy?: CancellationPolicy;
+}
+
+export interface CancellationValidationRequest {
+  readonly bookingRef: string;
+  readonly providerId: string;
+  readonly serviceId: string;
+}
+
+export interface CancellationValidation {
+  readonly startsAt: Date;
+  readonly endsAt: Date;
+  readonly cancellationPolicy: CancellationPolicy;
+  readonly bookingState: string;
 }
 
 export interface ListQuery {
@@ -150,6 +186,15 @@ export interface ProviderAdapter {
 
   searchProviders(query: SearchQuery, ctx: AdapterContext): Promise<SearchResult[]>;
   getAvailability(query: AvailabilityQuery, ctx: AdapterContext): Promise<Slot[]>;
+
+  /** Engine must verify ownership before supplying this provider booking reference. */
+  getAvailabilityForBooking?(query: AvailabilityQuery & { readonly bookingRef: string }, ctx: AdapterContext): Promise<Slot[]>;
+  /** Read-only preflight; unsupported moves fail before confirmation or write intent. */
+  validateReschedule?(request: RescheduleValidationRequest, ctx: AdapterContext): Promise<RescheduleValidation>;
+  /** Read the current appointment and policy before confirming cancellation or recording write intent. */
+  validateCancellation?(request: CancellationValidationRequest, ctx: AdapterContext): Promise<CancellationValidation>;
+  /** Resolve one selected service without enumerating every connected merchant. */
+  describeService?(query: { providerId: string; serviceId: string }, ctx: AdapterContext): Promise<ServiceDescription>;
 
   /**
    * Re-read a single slot immediately before committing a booking.
