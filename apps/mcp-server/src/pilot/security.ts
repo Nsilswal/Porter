@@ -47,7 +47,10 @@ export function requireSameOrigin(req: IncomingMessage, origin: string): void {
 
 export function privateResponse(res: ServerResponse): void {
   res.setHeader("Cache-Control", "no-store");
-  res.setHeader("Referrer-Policy", "no-referrer");
+  // Preserve a real Origin on native form POSTs while never forwarding paths,
+  // callback query strings or sign-in fragments as a referrer. no-referrer
+  // makes native forms send Origin: null and breaks the strict CSRF check.
+  res.setHeader("Referrer-Policy", "strict-origin");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");

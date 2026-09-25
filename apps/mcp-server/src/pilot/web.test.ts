@@ -85,7 +85,7 @@ describe.skipIf(!databaseUrl)("pilot browser authentication with PostgreSQL", ()
     const rows = await raw.query("SELECT token_hash, browser_nonce_hash FROM email_login_tokens");
     expect(JSON.stringify(rows.rows)).not.toContain(link.token);
     expect(link.response.headers.get("cache-control")).toBe("no-store");
-    expect(link.response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(link.response.headers.get("referrer-policy")).toBe("strict-origin");
   });
 
   it("does not spend a login link when an email scanner opens its GET page", async () => {
