@@ -1,8 +1,8 @@
 # Square integration contract for the salon pilot
 
-Updated: 2026-09-24. Status: official documentation reviewed and local adapter regressions tested. **No Square sandbox or production API has been exercised.** Fixtures remain synthetic. This document supports [the PRD](./product-prd.md) and [implementation plan](./implementation-plan.md); it does not establish launch readiness.
+Updated: 2026-09-24 (America/New_York). Status: the exact seven-scope sandbox grant passed discovery, create, identical replay, time-only reschedule and cancellation. See the [validation record](square-sandbox-validation.md) for captured evidence and remaining checks. Production and Muse have not been tested with this integration. This document supports [the PRD](./product-prd.md) and [implementation plan](./implementation-plan.md); it does not establish launch readiness.
 
-Mildred is a website reference, not a participating merchant. The user supplied an existing Square account and authorized test setup. Developer Console sign-in succeeded; the Porter sandbox application form is prepared, with creation waiting for the user's confirmation of Square's Developer Terms. No Square booking API validation has been performed. Do not connect or create appointments at Mildred based on the public URL.
+Mildred is a website reference, not a participating merchant. The user accepted the Developer Terms. The Porter Sandbox application and a separate Porter Pilot Salon sandbox seller are configured. Do not connect or create appointments at Mildred based on the public URL.
 
 ## Permission mode
 
@@ -20,7 +20,7 @@ Request these scopes together when connecting the merchant:
 | `CUSTOMERS_READ` | Find the customer record needed for the appointment. |
 | `CUSTOMERS_WRITE` | Create that customer record with required contact details. |
 
-Endpoint scope requirements come from [Square's OAuth permissions table](https://developer.squareup.com/docs/oauth-api/square-permissions). Do not request `APPOINTMENTS_ALL_WRITE`, payment scopes, catalog write access or business-settings write access for this pilot. `APPOINTMENTS_ALL_READ` is unnecessary for the selected buyer endpoints; the overview's broader free-plan example includes it, but the endpoint permissions table distinguishes it as seller-level read access. Validate the exact seven-scope grant in sandbox. If it fails, record the specific endpoint/error instead of silently escalating permissions.
+Endpoint scope requirements come from [Square's OAuth permissions table](https://developer.squareup.com/docs/oauth-api/square-permissions). Do not request `APPOINTMENTS_ALL_WRITE`, payment scopes, catalog write access or business-settings write access for this pilot. `APPOINTMENTS_ALL_READ` is unnecessary for the selected buyer endpoints; the overview's broader free-plan example includes it, but the endpoint permissions table distinguishes it as seller-level read access. The exact seven-scope grant was verified through token status and the sandbox lifecycle. For further failures, record the specific endpoint/error instead of silently escalating permissions.
 
 Buyer-level list/webhook visibility is application-wide within the merchant, not an authorization boundary between Porter's customers. Porter must persist and enforce customer ownership itself. Only its stored booking references belong in customer or owner views. [RetrieveBooking permissions](https://developer.squareup.com/reference/square/bookings/retrieve-booking), [booking event visibility](https://developer.squareup.com/docs/bookings-api/use-webhooks).
 
@@ -54,6 +54,8 @@ Catalog location rules and overrides: [CatalogObject](https://developer.squareup
 
 Buyer cancellation/rescheduling must respect the seller's rules, including `allow_user_cancel`, the cancellation window and appointment start time. Square describes the window as a cutoff for changes, not a promise that paying a fee permits late cancellation. The UI should show the merchant's policy text and a contact route when online management is unavailable. [Booking lifecycle rules](https://developer.squareup.com/docs/bookings-api/use-the-api), [BusinessAppointmentSettings](https://developer.squareup.com/reference/square/objects/BusinessAppointmentSettings).
 
+Buyer rescheduling changes **time only**, preserving the booked service, staff member and duration. Send a sparse `UpdateBooking` with the current version and new `start_at`; including even unchanged `appointment_segments` returned 403 under the verified grant. The adapter rejects segment changes or multiple segments before sending the update. Do not infer seller permissions from a merchant's subscription, request broader scopes, or cancel/recreate to bypass this restriction. The pilot quote/UI must filter unsupported changes before confirmation; the current engine can conservatively retain an uncertain-operation guard when the adapter rejects a mutation. [Square's buyer update fields](https://developer.squareup.com/docs/bookings-api/use-the-api), [sparse updates](https://developer.squareup.com/reference/square/bookings-api/update-booking).
+
 ## Sandbox setup sequence
 
 Once the developer account owner can sign in:
@@ -64,10 +66,10 @@ Once the developer account owner can sign in:
 4. Keep the free Appointments plan for this buyer-mode test. Add one test service with a fixed USD price, duration and online booking enabled.
 5. Under **Staff**, configure a bookable staff member, assign that service and location, and provide working hours. API creation of an employee alone does not make that person bookable.
 6. Select a test booking policy with no fee/card/deposit requirement; record the exact settings. Set customer cancellation/rescheduling terms. Use synthetic customer contact data.
-7. Return to the application, select **Sandbox**, then **OAuth**. Register the implemented Porter callback and securely configure that environment's application ID/secret. Authorize the test merchant with the scopes above.
+7. For adapter validation before the callback exists, use the Developer Console's sandbox OAuth authorization controls for the test account and select exactly the seven scopes above. Keep that token in an ignored local file. To validate the actual owner journey later, register the implemented Porter callback, configure the sandbox application ID/secret securely, and exercise the authorization code flow.
 8. Use `https://connect.squareupsandbox.com` for sandbox API requests. Retrieve the business profile and location to verify initialization. A production token must never be substituted to make a sandbox test pass.
 
-Square documents the dashboard/Appointments setup in [Onboard to Square Appointments](https://developer.squareup.com/docs/bookings-api/onboard-to-the-api), and application callback setup in [OAuth redirect registration](https://developer.squareup.com/docs/oauth-api/create-urls-for-square-authorization). These are preparation instructions, not completed steps. The account owner may need to complete verification or sign-in steps personally.
+Square documents the dashboard/Appointments setup in [Onboard to Square Appointments](https://developer.squareup.com/docs/bookings-api/onboard-to-the-api), sandbox grants in [Sandbox overview](https://developer.squareup.com/docs/devtools/sandbox/overview), and application callback setup in [OAuth redirect registration](https://developer.squareup.com/docs/oauth-api/create-urls-for-square-authorization). The [validation record](square-sandbox-validation.md) distinguishes completed setup from remaining policy and OAuth checks.
 
 ## Required provider validation record
 
@@ -79,7 +81,7 @@ Run this matrix with the exact OAuth grant and selected API version. Save saniti
 | Catalog and staff | Pagination, real presence/override fields, bookable staff, fixed and variable price cases; compare service duration against availability. |
 | Create/retrieve | Synthetic customer with phone; exact selected segment; actual `PENDING` or `ACCEPTED`; real provider reference. |
 | Repeat and uncertain create | Same full idempotency key + immutable payload; one resulting booking; recovery after response loss/restart. |
-| Reschedule/cancel | Current version, selected new segment, seller restrictions, actual resulting status, same-key retries. |
+| Reschedule/cancel | Current version, preserved segment with changed start time, seller restrictions, actual resulting status, same-key retries. |
 | Policy failures | Non-zero fee, card/deposit protection and unresolved prices remain unsupported; no silent booking-site handoff. |
 | OAuth lifecycle | Denial/invalid state, refresh, revoked/expired credentials, reconnect to same/different merchant. |
 | Events and notifications | Signed `booking.created`/`booking.updated` webhook delivery; edits from seller dashboard; determine buyer-mode email/SMS behavior for create/change/cancel. |
@@ -91,6 +93,6 @@ Square explicitly says seller-level create/update operations do not send custome
 
 Local tests exercise phone validation, contact matching, customer-lookup failures, known-fee rejection, preservation of selected durations and full idempotency keys, honest empty cancellation outcomes, catalog pagination/presence/overrides, fresh catalog checks and credential cache separation. The fake's fee-free and location fixtures now match documented structures. It rejects bookings without a customer phone.
 
-The adapter still pins `Square-Version: 2025-01-23`; the live documentation reviewed currently shows newer versions. Preserve the pin until versioned sandbox fixtures establish the migration target. No fixture should be described as captured from Square until it actually is.
+The adapter still pins `Square-Version: 2025-01-23`, which was used for the successful sandbox run. The live documentation reviewed currently shows newer versions. Preserve the pin until a separately tested migration establishes the target. Older fake fixtures remain synthetic; newly recorded examples are explicitly identified in the validation record.
 
-Durable customer booking ownership is implemented. Remaining integration work includes merchant ownership/routing, operation reconciliation, merchant OAuth, complete activation policy review, staff-dependent terms, buyer notification evidence, webhook processing, and an end-to-end Muse test. The smoke test's success, if run later, is narrower evidence than the complete matrix above.
+Durable customer booking ownership is implemented. Remaining integration work includes merchant ownership/routing, operation reconciliation, merchant OAuth, complete activation policy review, staff-dependent terms, buyer notification evidence, webhook processing, and an end-to-end Muse test. The successful smoke test is narrower evidence than the complete matrix above.

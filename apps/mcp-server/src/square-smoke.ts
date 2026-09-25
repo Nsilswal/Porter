@@ -313,7 +313,7 @@ async function main(): Promise<void> {
   for (const entry of report.checks) console.log(`${entry.status.toUpperCase()} ${entry.label}${entry.detail ? `: ${entry.detail}` : ""}`);
   console.log(`Result: ${report.outcome}; ${report.checks.filter((entry) => entry.status === "pass").length} checks passed.`);
   if (report.unresolvedBookingRefs.length) console.error(`Cancel these test bookings in the sandbox dashboard: ${report.unresolvedBookingRefs.join(", ")}`);
-  console.log("Evidence covers only the reported sandbox checks. Buyer OAuth scopes, notification delivery, Muse, and production readiness remain unverified. Synthetic customer records are retained.");
+  console.log("Evidence covers only the reported sandbox checks. This command does not verify granted OAuth scopes, notification delivery, Muse, or production readiness. Synthetic customer records are retained.");
   process.exitCode = report.outcome === "passed" ? 0 : 1;
 }
 

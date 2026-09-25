@@ -117,8 +117,8 @@ Recheck provider requirements during implementation. Existing repo documents als
 
 Remaining factual inputs:
 
-- Participating pilot owners and authority to connect/test their accounts; Mildred's status is unknown.
-- Availability of a Porter-owned Square developer application and appropriate testing credentials/configuration.
+- Participating pilot owners and authority to connect/test their accounts; Mildred is reference only.
+- Production Square application configuration once the sandbox owner OAuth journey is implemented and tested.
 - Actual Square plans, settings, bookable staff, service prices, and payment/cancellation requirements for pilot businesses.
 - Invited customers able to test the journey inside Muse.
 - Launch date, monthly operating budget, public domain, optional visual assets, email sender/provider, and support contact.
@@ -129,6 +129,7 @@ These facts do not require reopening accepted product decisions. Record new answ
 ### Implementation-session answers
 
 - Mildred is a reference only; no participating owner or live appointment authorization has been supplied.
-- The user has an existing Square account and authorized test setup. Developer Console sign-in succeeded. A `Porter Sandbox` application form was prepared; accepting Square's Developer Terms requires the pending user confirmation. No sandbox API validation has occurred yet.
+- The user has an existing Square account and authorized test setup. The user accepted Square's Developer Terms, and `Porter Sandbox` exists. A dedicated US `Porter Pilot Salon` sandbox seller is configured with the seven buyer permissions. See the [sandbox validation record](square-sandbox-validation.md) for observed results; no participating production merchant is connected.
+- Buyer permissions support time-only rescheduling with the original staff, service and duration. Staff/service changes need a salon contact route in the pilot; do not silently broaden permissions or cancel/recreate appointments.
 - There is no launch deadline, monthly budget, domain or preferred email provider yet. Keep low-cost local defaults and make deployment settings configurable.
 - Authentication credentials are excluded from these documents and from source control.
