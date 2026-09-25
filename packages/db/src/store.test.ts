@@ -341,8 +341,8 @@ describe.runIf(Boolean(databaseUrl))("PostgreSQL durability and encryption", () 
       await store.bookings.put(row);
       await store.close();
       // Restore the exact v1 schema and ledger, preserving its existing data.
-      await pool.query("DROP TABLE booking_mutations");
-      await pool.query("DELETE FROM porter_migrations WHERE version = 2");
+      await pool.query("DROP TABLE pilot_rate_limits, merchant_connections, square_oauth_states, pilot_businesses, connector_credentials, pilot_sessions, email_login_tokens, email_identities, booking_mutations");
+      await pool.query("DELETE FROM porter_migrations WHERE version > 1");
       await expect(createPostgresStore({ connectionString, encryptionKey })).rejects.toThrow("migrations do not match");
       await migratePostgres(connectionString);
       store = await createPostgresStore({ connectionString, encryptionKey });

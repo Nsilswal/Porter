@@ -12,6 +12,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import type { AuditRecord, BookingStatus, IdempotencyOperation, IdempotencyState, PaymentRecord } from "@porter/core";
+import type { BusinessStatus, ConnectionStatus, SquareEnvironment } from "./pilot-types.js";
 
 /**
  * Postgres schema (Railway Postgres, via Drizzle).
@@ -223,3 +224,86 @@ export const bookingMutations = pgTable(
     bookingOwner: foreignKey({ columns: [t.userId, t.bookingId], foreignColumns: [bookings.userId, bookings.id] }).onDelete("cascade"),
   }),
 );
+
+/** Email identities share the existing customer/booking user namespace. */
+export const emailIdentities = pgTable("email_identities", {
+  userId: text("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  email: text("email").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ byEmail: uniqueIndex("email_identities_email_idx").on(t.email) }));
+
+export const emailLoginTokens = pgTable("email_login_tokens", {
+  tokenHash: text("token_hash").primaryKey(),
+  browserNonceHash: text("browser_nonce_hash").notNull(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ byExpiry: index("email_login_tokens_expiry_idx").on(t.expiresAt) }));
+
+export const pilotSessions = pgTable("pilot_sessions", {
+  sessionHash: text("session_hash").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ byUser: uniqueIndex("pilot_sessions_user_hash_idx").on(t.userId, t.sessionHash), byExpiry: index("pilot_sessions_expiry_idx").on(t.expiresAt) }));
+
+export const connectorCredentials = pgTable("connector_credentials", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull(),
+  label: text("label").notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ byToken: uniqueIndex("connector_credentials_token_idx").on(t.tokenHash), byUser: index("connector_credentials_user_idx").on(t.userId) }));
+
+export const pilotBusinesses = pgTable("pilot_businesses", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  websiteUrl: text("website_url").notNull(),
+  name: text("name").notNull(),
+  status: text("status").$type<BusinessStatus>().notNull().default("draft"),
+  selectedLocationId: text("selected_location_id"),
+  profile: jsonb("profile").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ byOwner: uniqueIndex("pilot_businesses_owner_id_idx").on(t.ownerId, t.id) }));
+
+export const squareOAuthStates = pgTable("square_oauth_states", {
+  stateHash: text("state_hash").primaryKey(),
+  userId: text("user_id").notNull(),
+  sessionHash: text("session_hash").notNull(),
+  businessId: text("business_id").notNull(),
+  environment: text("environment").$type<SquareEnvironment>().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  connectionVersion: integer("connection_version"),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  owner: foreignKey({ columns: [t.userId, t.businessId], foreignColumns: [pilotBusinesses.ownerId, pilotBusinesses.id] }).onDelete("cascade"),
+  session: foreignKey({ columns: [t.userId, t.sessionHash], foreignColumns: [pilotSessions.userId, pilotSessions.sessionHash] }).onDelete("cascade"),
+  byExpiry: index("square_oauth_states_expiry_idx").on(t.expiresAt),
+}));
+
+export const merchantConnections = pgTable("merchant_connections", {
+  businessId: text("business_id").notNull().references(() => pilotBusinesses.id, { onDelete: "cascade" }),
+  environment: text("environment").$type<SquareEnvironment>().notNull(),
+  merchantId: text("merchant_id").notNull(),
+  status: text("status").$type<ConnectionStatus>().notNull().default("connected"),
+  version: integer("version").notNull().default(1),
+  credentialCipher: text("credential_cipher"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  scopes: jsonb("scopes").$type<string[]>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  refreshedAt: timestamp("refreshed_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ pk: primaryKey({ columns: [t.businessId, t.environment] }), byMerchant: uniqueIndex("merchant_connections_environment_merchant_idx").on(t.environment, t.merchantId) }));
+
+/** Hashed limiter namespaces only; no raw email/IP/user-agent values. */
+export const pilotRateLimits = pgTable("pilot_rate_limits", {
+  keyHash: text("key_hash").notNull(),
+  windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+  count: integer("count").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+}, (t) => ({ pk: primaryKey({ columns: [t.keyHash, t.windowStart] }), byExpiry: index("pilot_rate_limits_expiry_idx").on(t.expiresAt) }));
