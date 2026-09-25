@@ -74,6 +74,69 @@ CREATE TABLE booking_mutations (
   FOREIGN KEY (user_id, booking_id) REFERENCES bookings(user_id, id) ON DELETE CASCADE
 );
 `,
+}, {
+  version: 3,
+  sql: `
+CREATE TABLE email_identities (
+  user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, email text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX email_identities_email_idx ON email_identities(email);
+CREATE TABLE email_login_tokens (
+  token_hash text PRIMARY KEY CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+  browser_nonce_hash text NOT NULL CHECK (browser_nonce_hash ~ '^[0-9a-f]{64}$'),
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL,
+  consumed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX email_login_tokens_expiry_idx ON email_login_tokens(expires_at);
+CREATE TABLE pilot_sessions (
+  session_hash text PRIMARY KEY CHECK (session_hash ~ '^[0-9a-f]{64}$'),
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at timestamptz NOT NULL,
+  revoked_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX pilot_sessions_user_hash_idx ON pilot_sessions(user_id, session_hash);
+CREATE INDEX pilot_sessions_expiry_idx ON pilot_sessions(expires_at);
+CREATE TABLE connector_credentials (
+  id text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token_hash text NOT NULL CHECK (token_hash ~ '^[0-9a-f]{64}$'), label text NOT NULL,
+  revoked_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX connector_credentials_token_idx ON connector_credentials(token_hash);
+CREATE INDEX connector_credentials_user_idx ON connector_credentials(user_id);
+CREATE TABLE pilot_businesses (
+  id text PRIMARY KEY, owner_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  website_url text NOT NULL, name text NOT NULL,
+  status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'paused')),
+  selected_location_id text, profile jsonb NOT NULL DEFAULT '{}',
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX pilot_businesses_owner_id_idx ON pilot_businesses(owner_id, id);
+CREATE TABLE square_oauth_states (
+  state_hash text PRIMARY KEY CHECK (state_hash ~ '^[0-9a-f]{64}$'), user_id text NOT NULL,
+  session_hash text NOT NULL, business_id text NOT NULL,
+  environment text NOT NULL CHECK (environment IN ('sandbox', 'production')),
+  expires_at timestamptz NOT NULL, consumed_at timestamptz, connection_version integer CHECK (connection_version > 0), created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (user_id, business_id) REFERENCES pilot_businesses(owner_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id, session_hash) REFERENCES pilot_sessions(user_id, session_hash) ON DELETE CASCADE
+);
+CREATE INDEX square_oauth_states_expiry_idx ON square_oauth_states(expires_at);
+CREATE TABLE merchant_connections (
+  business_id text NOT NULL REFERENCES pilot_businesses(id) ON DELETE CASCADE,
+  environment text NOT NULL CHECK (environment IN ('sandbox', 'production')), merchant_id text NOT NULL,
+  status text NOT NULL DEFAULT 'connected' CHECK (status IN ('connected', 'reconnect_required', 'disconnecting', 'disconnected')),
+  version integer NOT NULL DEFAULT 1 CHECK (version > 0), credential_cipher text,
+  expires_at timestamptz NOT NULL, scopes jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), refreshed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (business_id, environment),
+  CHECK ((status = 'disconnected' AND credential_cipher IS NULL) OR (status <> 'disconnected' AND credential_cipher IS NOT NULL))
+);
+CREATE UNIQUE INDEX merchant_connections_environment_merchant_idx ON merchant_connections(environment, merchant_id);
+CREATE TABLE pilot_rate_limits (
+  key_hash text NOT NULL CHECK (key_hash ~ '^[0-9a-f]{64}$'), window_start timestamptz NOT NULL,
+  count integer NOT NULL CHECK (count > 0), expires_at timestamptz NOT NULL, PRIMARY KEY (key_hash, window_start)
+);
+CREATE INDEX pilot_rate_limits_expiry_idx ON pilot_rate_limits(expires_at);
+`,
 }] as const;
 
 function checksum(sql: string): string {

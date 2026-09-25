@@ -1,10 +1,9 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { and, asc, desc, eq, lte, or } from "drizzle-orm";
-import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { Store } from "@porter/core";
 import * as schema from "./schema.js";
-import { assertMigrationsApplied } from "./migrations.js";
+import { openDatabase, type DatabaseOptions } from "./database-connection.js";
 import { unwrapKey, wrapKey } from "./encryption.js";
 
 export interface PostgresStore extends Store {
@@ -12,12 +11,7 @@ export interface PostgresStore extends Store {
   close(): Promise<void>;
 }
 
-export interface PostgresStoreOptions {
-  readonly connectionString: string;
-  /** Independent from the confirmation-signing secret. Persist securely across deploys. */
-  readonly encryptionKey: Buffer;
-  readonly maxConnections?: number;
-}
+export type PostgresStoreOptions = DatabaseOptions;
 
 type Executor = Pick<NodePgDatabase<typeof schema>, "insert" | "select" | "update" | "delete">;
 
@@ -29,54 +23,9 @@ function idempotencyWhere(userId: string, tool: string, key: string) {
   return and(eq(schema.idempotencyKeys.userId, userId), eq(schema.idempotencyKeys.tool, tool), eq(schema.idempotencyKeys.key, key));
 }
 
-const canaryContext = "porter:store-encryption:v1";
-const canaryPlaintext = Buffer.from("porter deployment encryption key");
-
 /** Opens an already-migrated database. Startup fails before accepting traffic on a wrong key. */
 export async function createPostgresStore(options: PostgresStoreOptions): Promise<PostgresStore> {
-  if (!Buffer.isBuffer(options.encryptionKey) || options.encryptionKey.length !== 32) {
-    throw new Error("Database encryption key must be exactly 32 bytes");
-  }
-  if (options.maxConnections !== undefined && (!Number.isSafeInteger(options.maxConnections) || options.maxConnections < 1)) {
-    throw new Error("Database pool size must be a positive integer");
-  }
-  const masterKey = Buffer.from(options.encryptionKey);
-  const pool = new Pool({
-    connectionString: options.connectionString,
-    max: options.maxConnections ?? 10,
-    connectionTimeoutMillis: 10_000,
-    idleTimeoutMillis: 30_000,
-    statement_timeout: 15_000,
-  });
-  // An idle connection can fail during a database restart. pg discards it;
-  // requests/health still receive errors, while this listener prevents a crash.
-  pool.on("error", () => undefined);
-  const db = drizzle(pool, { schema });
-  let closing: Promise<void> | undefined;
-  async function close(): Promise<void> {
-    closing ??= pool.end().finally(() => masterKey.fill(0));
-    await closing;
-  }
-  async function health(): Promise<void> {
-    if (closing) throw new Error("Database store is closed");
-    await assertMigrationsApplied(pool);
-  }
-  try {
-    await health();
-    await db.insert(schema.storeMetadata).values({
-      key: "encryption_canary",
-      value: wrapKey(canaryPlaintext, masterKey, canaryContext),
-    }).onConflictDoNothing();
-    const [canary] = await db.select().from(schema.storeMetadata).where(eq(schema.storeMetadata.key, "encryption_canary"));
-    if (!canary) throw new Error("Missing database encryption canary");
-    const plaintext = unwrapKey(canary.value, masterKey, canaryContext);
-    if (plaintext.length !== canaryPlaintext.length || !timingSafeEqual(plaintext, canaryPlaintext)) {
-      throw new Error("Database encryption canary is invalid");
-    }
-  } catch (error) {
-    await close();
-    throw error;
-  }
+  const { db, masterKey, health, close } = await openDatabase(options);
 
   return {
     health,

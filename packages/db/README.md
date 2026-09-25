@@ -17,6 +17,19 @@ The application never creates tables on startup. Ordered migration SQL lives in 
 
 Do not use `drizzle-kit push` as a deployment step: it bypasses this migration ledger.
 
+## Pilot identities and merchant connections
+
+`createPilotStore` uses the same connection options, startup canary, and migration gate as the core store. It always uses PostgreSQL. Its API is separate from the core booking `Store`; merchant tokens are never customer connector credentials.
+
+- Email identities normalize to a unique address and share the core `users` namespace. A verified email link creates a session only when its token hash and browser nonce hash match. Consuming the link and inserting the session occur in one transaction. Tokens, browser nonces, sessions, and personal connector credentials are stored as SHA-256 hashes only. The application generates high-entropy values and delivers the originals.
+- Sessions and customer connector credentials support durable revocation. Lookups reject soft-deleted users. OAuth state binds the owner, session, business, Square environment, and connection version; revocation and consumption serialize through a session row lock. Installing merchant credentials also rechecks the live session after the external token exchange.
+- Business reads and writes require the owner, except explicitly server-only routing methods. The first selected location cannot be replaced. Each Square environment/merchant pair belongs to exactly one business, including after disconnect, and a business cannot reconnect to a different merchant. Activation eligibility remains an application responsibility.
+- Merchant access and refresh tokens use AES-256-GCM with authenticated context containing the business, environment, and merchant. Ordinary connection views exclude tokens and ciphertext. Only explicit server-only credential methods decrypt them. Expired access tokens remain available for refresh; disconnected and reconnect-required grants do not route requests.
+- Refresh uses a version compare-and-swap. OAuth callbacks must present the version saved at authorization start. A disconnect first pauses the business, blocks routing and refresh, and durably retains encrypted revocation credentials. Only the first caller receives credentials for the remote revocation attempt. After Square confirms revocation, finishing the disconnect clears ciphertext. An interrupted or uncertain revocation requires operator reconciliation; it never retries automatically. This prevents a delayed duplicate revocation from revoking a newly authorized grant. A new authorization cannot replace a pending revocation.
+- Shared fixed-window rate limits persist only namespaced key hashes. The caller must use a distinct namespace for each policy and supply server time. Expired rate windows, login tokens, sessions, and OAuth states are safe to prune once their expiry has passed; automated retention cleanup is not implemented here.
+
+Authorization, secure cookies, email delivery, consent, OAuth protocol validation, and provider revocation belong to the application layer. Do not expose server-only store methods directly as HTTP endpoints. Revoke external grants before soft-deleting an owner so recovery can still resolve the owner and business.
+
 ## Retry and ownership rules
 
 - Booking IDs are globally unique. Updates cannot transfer a booking to a different owner or provider reference. Payments must refer to a booking owned by the same user.
@@ -31,7 +44,7 @@ Do not use `drizzle-kit push` as a deployment step: it bypasses this migration l
 The storage contract runs against memory on every test run. Set `TEST_DATABASE_URL` to an expendable PostgreSQL database to also run real concurrency, restart, migration, ownership, and encryption checks:
 
 ```sh
-TEST_DATABASE_URL=postgres://porter:porter@127.0.0.1:55432/porter pnpm exec vitest run packages/db/src/store.test.ts
+TEST_DATABASE_URL=postgres://porter:porter@127.0.0.1:55432/porter pnpm exec vitest run packages/db/src/store.test.ts packages/db/src/pilot.test.ts
 ```
 
 Tests create and delete uniquely named schemas. They require schema-creation privileges and do not mutate application tables in the default schema. Without `TEST_DATABASE_URL`, PostgreSQL cases are explicitly skipped; a passing memory-only run does not verify PostgreSQL.
