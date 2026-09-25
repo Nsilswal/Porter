@@ -3,6 +3,7 @@ import {
   PorterError,
   assertNotAborted,
   money,
+  stableHash,
   type HttpClient,
   type HttpResponse,
   type Money,
@@ -166,7 +167,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
   async getAvailability(query: AvailabilityQuery, ctx: AdapterContext): Promise<Slot[]> {
     assertNotAborted(ctx.signal, this.id);
     const { locationId, variation } = await this.#resolveService(query.providerId, query.serviceId, ctx);
-    return this.#searchAvailability(locationId, variation, query.from, query.to, query.limit, ctx);
+    return this.#searchAvailability(locationId, variation, query.from, query.to, query.limit, ctx, query.providerSlotRef);
   }
 
   async checkSlot(
@@ -234,6 +235,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
       throw new PorterError("INVALID_REQUEST", "Choose an available appointment before booking.");
     }
     const durationMinutes = appointmentDuration(request.startsAt, request.endsAt);
+    assertConfirmedTerms(request, variation, profile);
     const customerId = await this.#ensureCustomer(customer, request.idempotencyKey, ctx);
 
     const res = await this.#request<BookingResponse>(
@@ -282,6 +284,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     const profile = await this.#bookingProfile(ctx, true);
     assertSupportedBooking(profile, variation);
     const durationMinutes = appointmentDuration(request.startsAt, request.endsAt);
+    assertConfirmedTerms(request, variation, profile);
     const segment = existing.appointment_segments?.[0];
     // Buyer permissions allow a sparse start_at update, but appointment_segments
     // become immutable after creation. Omitting them is safe only when it keeps
@@ -334,6 +337,10 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
       throw new PorterError("NOT_FOUND", "We could not find that booking at this business.");
     }
     const profile = await this.#bookingProfile(ctx, true);
+
+    if (request.expectedCancellationPolicy && stableHash(mapCancellationPolicy(profile, new Date(existing.start_at ?? ctx.now.toISOString()))) !== stableHash(request.expectedCancellationPolicy)) {
+      throw new PorterError("CONFIRMATION_STALE", "The appointment's cancellation rules changed. Review the current details before confirming again.");
+    }
 
     const res = await this.#request<BookingResponse>(
       "POST",
@@ -656,6 +663,20 @@ function assertSupportedBooking(profile: SquareBusinessBookingProfile, variation
   }
   if (!variation.service.price || variation.service.quoteRequired) {
     throw new PorterError("QUOTE_REQUIRED", "This service needs a confirmed price before it can be booked.");
+  }
+}
+
+/** A fresh inner adapter must never substitute newly fetched, unconfirmed terms. */
+function assertConfirmedTerms(request: CreateBookingRequest | RescheduleRequest, variation: MappedVariation, profile: SquareBusinessBookingProfile): void {
+  const expected = request.expectedTerms;
+  if (!expected) return;
+  const current = {
+    price: variation.service.price ?? null,
+    deposit: variation.service.depositRequired ?? null,
+    cancellationPolicy: mapCancellationPolicy(profile, request.startsAt),
+  };
+  if (stableHash(current) !== stableHash(expected) || variation.service.durationMinutes !== appointmentDuration(request.startsAt, request.endsAt)) {
+    throw new PorterError("CONFIRMATION_STALE", "The service price, duration or booking rules changed. Review the current details before confirming again.");
   }
 }
 

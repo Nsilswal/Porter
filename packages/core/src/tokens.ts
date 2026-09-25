@@ -62,6 +62,9 @@ export interface SlotTokenPayload extends Record<string, unknown> {
   readonly r?: string; // provider slot ref
   readonly c?: number; // price minor units
   readonly u?: string; // currency
+  /** Management-only slots bind to the Porter booking and its customer. */
+  readonly b?: string;
+  readonly uid?: string;
 }
 
 export interface ConfirmationTokenPayload extends Record<string, unknown> {
