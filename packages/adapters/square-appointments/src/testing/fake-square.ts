@@ -3,7 +3,7 @@ import locationsFixture from "../fixtures/locations.json" with { type: "json" };
 import catalogFixture from "../fixtures/catalog.json" with { type: "json" };
 import profileFixture from "../fixtures/business-booking-profile.json" with { type: "json" };
 import teamFixture from "../fixtures/team-members.json" with { type: "json" };
-import type { SquareBooking, SquareCatalogObject, SquareLocation } from "../api.js";
+import type { SquareBooking, SquareCatalogObject, SquareCustomer, SquareLocation } from "../api.js";
 
 /**
  * A wire-level fake of Square Appointments.
@@ -39,7 +39,7 @@ interface StoredBooking extends Mutable<SquareBooking> {
 
 export class FakeSquare implements HttpClient {
   readonly bookings = new Map<string, StoredBooking>();
-  readonly customers = new Map<string, { id: string; email_address?: string; given_name?: string }>();
+  readonly customers = new Map<string, SquareCustomer>();
   readonly requests: { method: string; path: string; body: unknown }[] = [];
   readonly #idempotency = new Map<string, string>();
   readonly #options: FakeSquareOptions;
@@ -85,8 +85,11 @@ export class FakeSquare implements HttpClient {
       return json(200, { availabilities: this.#availability(request.body) });
     }
     if (request.method === "POST" && path === "/v2/customers/search") {
-      const email = (request.body as any)?.query?.filter?.email_address?.exact as string | undefined;
-      const hit = [...this.customers.values()].find((c) => c.email_address === email);
+      const filter = (request.body as { query?: { filter?: { email_address?: { exact?: string }; phone_number?: { exact?: string } } } })?.query?.filter;
+      const hit = [...this.customers.values()].find((c) =>
+        (!filter?.email_address?.exact || c.email_address === filter.email_address.exact) &&
+        (!filter?.phone_number?.exact || c.phone_number === filter.phone_number.exact),
+      );
       return json(200, hit ? { customers: [hit] } : {});
     }
     if (request.method === "POST" && path === "/v2/customers") {
@@ -133,6 +136,9 @@ export class FakeSquare implements HttpClient {
     }
 
     const booking = payload.booking;
+    if (!booking?.customer_id || !this.customers.get(booking.customer_id)?.phone_number) {
+      return json(400, { errors: [{ category: "INVALID_REQUEST_ERROR", code: "BAD_REQUEST", field: "phone" }] });
+    }
     const startAt = booking?.start_at;
     const segment = booking?.appointment_segments?.[0];
     if (!startAt || !segment?.service_variation_id || !segment.team_member_id) {

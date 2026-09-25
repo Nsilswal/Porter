@@ -96,6 +96,14 @@ export interface MappedVariation {
   readonly teamMemberIds: readonly string[];
 }
 
+/** Items and variations each have their own location visibility. */
+export function isPresentAtLocation(object: SquareCatalogObject, locationId: string): boolean {
+  if (object.is_deleted) return false;
+  return object.present_at_all_locations === false
+    ? object.present_at_location_ids?.includes(locationId) === true
+    : !object.absent_at_location_ids?.includes(locationId);
+}
+
 export function mapServiceVariation(
   adapterId: string,
   locationId: string,
@@ -104,16 +112,27 @@ export function mapServiceVariation(
   categoryName: string | undefined,
 ): MappedVariation | null {
   const v = variation.item_variation_data;
-  if (!v || v.available_for_booking === false) return null;
+  if (
+    !v || v.available_for_booking !== true || item.item_data?.is_archived ||
+    !isPresentAtLocation(item, locationId) || !isPresentAtLocation(variation, locationId)
+  ) return null;
+  // A fabricated default duration/version would turn an incomplete import
+  // into a different appointment. Keep incomplete offerings out of booking.
+  if (!v.service_duration || !Number.isSafeInteger(v.service_duration) || v.service_duration % 60_000 !== 0) return null;
+  const version = variation.version;
+  if (v.service_duration < 0 || version === undefined || !Number.isSafeInteger(version) || version < 0) return null;
 
   const itemName = item.item_data?.name ?? "";
   const variationName = v.name ?? "";
   const fullName = variationName && variationName !== itemName ? `${itemName} — ${variationName}` : itemName;
 
+  const override = v.location_overrides?.find((entry) => entry.location_id === locationId);
+  const pricingType = override?.pricing_type ?? v.pricing_type;
+  const priceMoney = override?.price_money ?? v.price_money;
   const price: Money | undefined =
-    v.pricing_type === "VARIABLE_PRICING" || v.price_money?.amount === undefined
+    pricingType !== "FIXED_PRICING" || priceMoney?.amount === undefined || !priceMoney.currency
       ? undefined
-      : money(v.price_money.amount, v.price_money.currency ?? "USD");
+      : money(priceMoney.amount, priceMoney.currency);
 
   const service: Service = {
     id: `${adapterId}:${locationId}:${variation.id}`,
@@ -133,7 +152,7 @@ export function mapServiceVariation(
   return {
     service,
     variationId: variation.id,
-    variationVersion: variation.version ?? 0,
+    variationVersion: version,
     teamMemberIds: v.team_member_ids ?? [],
   };
 }

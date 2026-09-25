@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   PorterError,
   assertNotAborted,
@@ -36,7 +37,6 @@ import {
   type SquareBusinessBookingProfile,
   type SquareCatalogObject,
   type SquareLocation,
-  type TeamMemberBookingProfilesResponse,
 } from "./api.js";
 import {
   mapBooking,
@@ -96,7 +96,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
   readonly #apiVersion: string;
   readonly #catalogTtlMs: number;
   readonly #catalog = new Map<string, CatalogEntry>();
-  #profile: { value: SquareBusinessBookingProfile | undefined; fetchedAt: number } | null = null;
+  readonly #profiles = new Map<string, { value: SquareBusinessBookingProfile; fetchedAt: number }>();
 
   constructor(options: SquareAdapterOptions) {
     this.id = options.id ?? "square";
@@ -117,10 +117,9 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
       messaging: false,
       remoteBookingList: true,
       categories: SQUARE_CATEGORIES,
-      // Square attaches a Customer to a booking. Given name plus one contact
-      // method is the minimum that lets the seller identify and reach them.
-      requiredCustomerFields: ["givenName", "email"],
-      optionalCustomerFields: ["familyName", "phone", "notes"],
+      // Square requires the attached Customer to have a phone number.
+      requiredCustomerFields: ["givenName", "phone"],
+      optionalCustomerFields: ["familyName", "email", "notes"],
     };
   }
 
@@ -172,7 +171,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     ctx: AdapterContext,
   ): Promise<Slot | null> {
     assertNotAborted(ctx.signal, this.id);
-    const { locationId, variation } = await this.#resolveService(query.providerId, query.serviceId, ctx);
+    const { locationId, variation } = await this.#resolveService(query.providerId, query.serviceId, ctx, true);
 
     // A one-minute window either side: Square matches on exact start times.
     const from = new Date(query.startsAt.getTime() - 60_000);
@@ -192,7 +191,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
   async getCancellationPolicy(bookingRef: string, ctx: AdapterContext): Promise<CancellationPolicy> {
     assertNotAborted(ctx.signal, this.id);
     const booking = await this.#retrieveBooking(bookingRef, ctx);
-    const profile = await this.#bookingProfile(ctx);
+    const profile = await this.#bookingProfile(ctx, true);
     return mapCancellationPolicy(profile, new Date(booking.start_at ?? ctx.now.toISOString()));
   }
 
@@ -202,7 +201,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     ctx: AdapterContext,
   ): Promise<CancellationPolicy> {
     assertNotAborted(ctx.signal, this.id);
-    const profile = await this.#bookingProfile(ctx);
+    const profile = await this.#bookingProfile(ctx, true);
     return mapCancellationPolicy(profile, query.startsAt);
   }
 
@@ -226,14 +225,19 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
 
   async createBooking(request: CreateBookingRequest, ctx: AdapterContext): Promise<Booking> {
     assertNotAborted(ctx.signal, this.id);
+    validateIdempotencyKey(request.idempotencyKey);
     const { locationId, variation } = await this.#resolveService(request.providerId, request.serviceId, ctx);
-
-    const teamMemberId = request.providerSlotRef ?? (await this.#anyBookableTeamMember(variation, ctx));
-    if (!teamMemberId) {
-      throw new PorterError("PROVIDER_UNAVAILABLE", "Nobody at that business is available to take this appointment.");
+    if (request.locationId !== `${this.id}:${locationId}`) {
+      throw new PorterError("INVALID_REQUEST", "The appointment location does not match the selected business.");
     }
-
-    const customerId = await this.#ensureCustomer(request.customer, ctx);
+    const profile = await this.#bookingProfile(ctx, true);
+    assertSupportedBooking(profile, variation);
+    const teamMemberId = request.providerSlotRef;
+    if (!teamMemberId) {
+      throw new PorterError("INVALID_REQUEST", "Choose an available appointment before booking.");
+    }
+    const durationMinutes = appointmentDuration(request.startsAt, request.endsAt);
+    const customerId = await this.#ensureCustomer(request.customer, request.idempotencyKey, ctx);
 
     const res = await this.#request<BookingResponse>(
       "POST",
@@ -241,14 +245,14 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
       {
         // Square supports idempotency natively, so protection is end to end
         // rather than stopping at Porter's boundary.
-        idempotency_key: request.idempotencyKey.slice(0, 192),
+        idempotency_key: request.idempotencyKey,
         booking: {
           location_id: locationId,
           start_at: request.startsAt.toISOString(),
           customer_id: customerId,
           appointment_segments: [
             {
-              duration_minutes: variation.service.durationMinutes,
+              duration_minutes: durationMinutes,
               service_variation_id: variation.variationId,
               service_variation_version: variation.variationVersion,
               team_member_id: teamMemberId,
@@ -263,11 +267,10 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     const booking = res.booking;
     if (!booking) throw new PorterError("ADAPTER_DOWN", "That business's booking system did not confirm the appointment.");
 
-    const profile = await this.#bookingProfile(ctx);
     return mapBooking(
       this.id,
       booking,
-      variation.service.durationMinutes,
+      durationMinutes,
       mapCancellationPolicy(profile, new Date(booking.start_at ?? request.startsAt.toISOString())),
       variation.service.price,
     );
@@ -275,15 +278,20 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
 
   async rescheduleBooking(request: RescheduleRequest, ctx: AdapterContext): Promise<Booking> {
     assertNotAborted(ctx.signal, this.id);
+    validateIdempotencyKey(request.idempotencyKey);
     const existing = await this.#retrieveBooking(request.bookingRef, ctx);
-    const { variation } = await this.#resolveService(request.providerId, request.serviceId, ctx);
+    const { locationId, variation } = await this.#resolveService(request.providerId, request.serviceId, ctx);
+    if (existing.location_id !== locationId) throw new PorterError("NOT_FOUND", "We could not find that booking at this business.");
+    const profile = await this.#bookingProfile(ctx, true);
+    assertSupportedBooking(profile, variation);
+    const durationMinutes = appointmentDuration(request.startsAt, request.endsAt);
     const segment = existing.appointment_segments?.[0];
 
     const res = await this.#request<BookingResponse>(
       "PUT",
       `/v2/bookings/${encodeURIComponent(request.bookingRef)}`,
       {
-        idempotency_key: request.idempotencyKey.slice(0, 192),
+        idempotency_key: request.idempotencyKey,
         booking: {
           // Square uses optimistic concurrency: the version must match, so a
           // booking changed underneath us fails rather than clobbering.
@@ -291,7 +299,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
           start_at: request.startsAt.toISOString(),
           appointment_segments: [
             {
-              duration_minutes: variation.service.durationMinutes,
+              duration_minutes: durationMinutes,
               service_variation_id: variation.variationId,
               service_variation_version: variation.variationVersion,
               team_member_id: request.providerSlotRef ?? segment?.team_member_id,
@@ -304,11 +312,10 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
 
     const booking = res.booking;
     if (!booking) throw new PorterError("ADAPTER_DOWN", "That business's booking system did not confirm the change.");
-    const profile = await this.#bookingProfile(ctx);
     return mapBooking(
       this.id,
       booking,
-      variation.service.durationMinutes,
+      durationMinutes,
       mapCancellationPolicy(profile, new Date(booking.start_at ?? request.startsAt.toISOString())),
       variation.service.price,
     );
@@ -316,17 +323,22 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
 
   async cancelBooking(request: CancelRequest, ctx: AdapterContext): Promise<Booking> {
     assertNotAborted(ctx.signal, this.id);
+    validateIdempotencyKey(request.idempotencyKey);
     const existing = await this.#retrieveBooking(request.bookingRef, ctx);
+    if (`${this.id}:${existing.location_id}` !== request.providerId) {
+      throw new PorterError("NOT_FOUND", "We could not find that booking at this business.");
+    }
+    const profile = await this.#bookingProfile(ctx, true);
 
     const res = await this.#request<BookingResponse>(
       "POST",
       `/v2/bookings/${encodeURIComponent(request.bookingRef)}/cancel`,
-      { idempotency_key: request.idempotencyKey.slice(0, 192), booking_version: existing.version },
+      { idempotency_key: request.idempotencyKey, booking_version: existing.version },
       ctx,
     );
 
-    const booking = res.booking ?? { ...existing, status: "CANCELLED_BY_CUSTOMER" as const };
-    const profile = await this.#bookingProfile(ctx);
+    const booking = res.booking;
+    if (!booking) throw new PorterError("ADAPTER_DOWN", "That business's booking system did not confirm the cancellation.");
     const duration = booking.appointment_segments?.[0]?.duration_minutes ?? 60;
     return mapBooking(
       this.id,
@@ -380,22 +392,28 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     return (res.locations ?? []).filter((l) => l.status !== "INACTIVE");
   }
 
-  async #catalogFor(location: SquareLocation, ctx: AdapterContext): Promise<CatalogEntry> {
-    const cached = this.#catalog.get(location.id);
-    if (cached && ctx.now.getTime() - cached.fetchedAt < this.#catalogTtlMs) return cached;
+  async #catalogFor(location: SquareLocation, ctx: AdapterContext, refresh = false): Promise<CatalogEntry> {
+    const cacheKey = `${credentialScope(ctx)}:${location.id}`;
+    const cached = this.#catalog.get(cacheKey);
+    if (!refresh && cached && ctx.now.getTime() - cached.fetchedAt < this.#catalogTtlMs) return cached;
 
-    const res = await this.#request<SearchCatalogResponse>(
-      "POST",
-      "/v2/catalog/search",
-      {
-        object_types: ["ITEM", "CATEGORY"],
-        include_related_objects: true,
-        query: { prefix_query: { attribute_name: "name", attribute_prefix: "" } },
-      },
-      ctx,
-    );
-
-    const objects = res.objects ?? [];
+    const objects: SquareCatalogObject[] = [];
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const res = await this.#request<SearchCatalogResponse>(
+        "POST",
+        "/v2/catalog/search",
+        { object_types: ["ITEM", "CATEGORY"], include_related_objects: true, ...(cursor ? { cursor } : {}) },
+        ctx,
+      );
+      objects.push(...(res.objects ?? []), ...(res.related_objects ?? []));
+      cursor = res.cursor;
+      if (cursor && cursors.has(cursor)) {
+        throw new PorterError("ADAPTER_DOWN", "That business's service list could not be loaded completely.");
+      }
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
     const categoryNames = new Map<string, string>();
     for (const o of objects) {
       if (o.type === "CATEGORY" && o.category_data?.name) categoryNames.set(o.id, o.category_data.name);
@@ -410,9 +428,6 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
       const categoryName = item.item_data.categories?.[0]?.id ? categoryNames.get(item.item_data.categories[0].id!) : undefined;
 
       for (const variation of item.item_data.variations ?? []) {
-        const locations = variation.item_variation_data?.location_ids;
-        if (locations && locations.length > 0 && !locations.includes(location.id)) continue;
-
         const mapped = mapServiceVariation(this.id, location.id, item, variation, categoryName);
         if (!mapped) continue;
         variations.set(mapped.variationId, mapped);
@@ -423,7 +438,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     }
 
     const entry: CatalogEntry = { location, variations, unmapped, fetchedAt: ctx.now.getTime() };
-    this.#catalog.set(location.id, entry);
+    this.#catalog.set(cacheKey, entry);
     return entry;
   }
 
@@ -431,19 +446,25 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     providerId: string,
     serviceId: string,
     ctx: AdapterContext,
+    refresh = false,
   ): Promise<{ locationId: string; variation: MappedVariation }> {
-    const locationId = stripPrefix(providerId, `${this.id}:`);
-    const variationId = serviceId.split(":").pop() ?? serviceId;
+    const providerPrefix = `${this.id}:`;
+    const servicePrefix = `${providerId}:`;
+    if (!providerId.startsWith(providerPrefix) || !serviceId.startsWith(servicePrefix)) {
+      throw new PorterError("NOT_FOUND", "We could not find that service at this business.");
+    }
+    const locationId = providerId.slice(providerPrefix.length);
+    const variationId = serviceId.slice(servicePrefix.length);
 
-    const cached = this.#catalog.get(locationId);
+    const cached = this.#catalog.get(`${credentialScope(ctx)}:${locationId}`);
     const hit = cached?.variations.get(variationId);
-    if (hit && ctx.now.getTime() - cached!.fetchedAt < this.#catalogTtlMs) return { locationId, variation: hit };
+    if (!refresh && hit && cached && ctx.now.getTime() - cached.fetchedAt < this.#catalogTtlMs) return { locationId, variation: hit };
 
     const locations = await this.#locations(ctx);
     const location = locations.find((l) => l.id === locationId);
     if (!location) throw new PorterError("NOT_FOUND", "We could not find that business.");
 
-    const entry = await this.#catalogFor(location, ctx);
+    const entry = await this.#catalogFor(location, ctx, refresh);
     const variation = entry.variations.get(variationId);
     if (!variation) throw new PorterError("NOT_FOUND", "We could not find that service.");
     return { locationId, variation };
@@ -513,38 +534,20 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     }
   }
 
-  async #bookingProfile(ctx: AdapterContext): Promise<SquareBusinessBookingProfile | undefined> {
-    if (this.#profile && ctx.now.getTime() - this.#profile.fetchedAt < this.#catalogTtlMs) return this.#profile.value;
-    try {
-      const res = await this.#request<BusinessBookingProfileResponse>("GET", "/v2/bookings/business-booking-profile", undefined, ctx);
-      this.#profile = { value: res.business_booking_profile, fetchedAt: ctx.now.getTime() };
-      return res.business_booking_profile;
-    } catch {
-      // Report the policy as unknown rather than failing the whole operation.
-      this.#profile = { value: undefined, fetchedAt: ctx.now.getTime() };
-      return undefined;
-    }
+  async #bookingProfile(ctx: AdapterContext, refresh = false): Promise<SquareBusinessBookingProfile> {
+    const cacheKey = credentialScope(ctx);
+    const cached = this.#profiles.get(cacheKey);
+    if (!refresh && cached && ctx.now.getTime() - cached.fetchedAt < this.#catalogTtlMs) return cached.value;
+    const res = await this.#request<BusinessBookingProfileResponse>("GET", "/v2/bookings/business-booking-profile", undefined, ctx);
+    if (!res.business_booking_profile) throw new PorterError("ADAPTER_DOWN", "That business's booking settings could not be loaded.");
+    this.#profiles.set(cacheKey, { value: res.business_booking_profile, fetchedAt: ctx.now.getTime() });
+    return res.business_booking_profile;
   }
 
   async #retrieveBooking(bookingRef: string, ctx: AdapterContext) {
     const res = await this.#request<BookingResponse>("GET", `/v2/bookings/${encodeURIComponent(bookingRef)}`, undefined, ctx);
     if (!res.booking) throw new PorterError("NOT_FOUND", "We could not find that booking.");
     return res.booking;
-  }
-
-  async #anyBookableTeamMember(variation: MappedVariation, ctx: AdapterContext): Promise<string | undefined> {
-    if (variation.teamMemberIds.length > 0) return variation.teamMemberIds[0];
-    try {
-      const res = await this.#request<TeamMemberBookingProfilesResponse>(
-        "GET",
-        "/v2/bookings/team-member-booking-profiles?bookable_only=true&limit=10",
-        undefined,
-        ctx,
-      );
-      return res.team_member_booking_profiles?.find((p) => p.is_bookable !== false)?.team_member_id;
-    } catch {
-      return undefined;
-    }
   }
 
   /**
@@ -554,27 +557,28 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
    * Search-before-create avoids piling up duplicate customer records in the
    * seller's account on every repeat booking.
    */
-  async #ensureCustomer(customer: CreateBookingRequest["customer"], ctx: AdapterContext): Promise<string> {
-    const email = customer.email;
-    if (email) {
-      try {
-        const found = await this.#request<SearchCustomersResponse>(
-          "POST",
-          "/v2/customers/search",
-          { limit: 1, query: { filter: { email_address: { exact: email } } } },
-          ctx,
-        );
-        const existing = found.customers?.[0]?.id;
-        if (existing) return existing;
-      } catch {
-        // Fall through to create.
-      }
-    }
+  async #ensureCustomer(customer: CreateBookingRequest["customer"], idempotencyKey: string, ctx: AdapterContext): Promise<string> {
+    if (!customer.phone?.trim()) throw new PorterError("INVALID_REQUEST", "Square requires a phone number for this appointment.");
+    const found = await this.#request<SearchCustomersResponse>(
+      "POST",
+      "/v2/customers/search",
+      {
+        limit: 1,
+        query: { filter: {
+          phone_number: { exact: customer.phone },
+          ...(customer.email ? { email_address: { exact: customer.email } } : {}),
+        } },
+      },
+      ctx,
+    );
+    const existing = found.customers?.find((entry) => entry.phone_number)?.id;
+    if (existing) return existing;
 
     const created = await this.#request<CustomerResponse>(
       "POST",
       "/v2/customers",
       {
+        idempotency_key: createHash("sha256").update(JSON.stringify(["customer", ctx.actorId, idempotencyKey])).digest("hex"),
         ...(customer.givenName ? { given_name: customer.givenName } : {}),
         ...(customer.familyName ? { family_name: customer.familyName } : {}),
         ...(customer.email ? { email_address: customer.email } : {}),
@@ -591,10 +595,9 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     const variationId = booking.appointment_segments?.[0]?.service_variation_id;
     const locationId = booking.location_id;
     if (!variationId || !locationId) return undefined;
-    const entry = this.#catalog.get(locationId);
+    const entry = this.#catalog.get(`${credentialScope(ctx)}:${locationId}`);
     const price = entry?.variations.get(variationId)?.service.price;
     if (price) return price;
-    void ctx;
     return undefined;
   }
 }
@@ -604,8 +607,34 @@ function matches(service: Service, text: string): boolean {
   return String(service.name).toLowerCase().includes(q) || String(service.description ?? "").toLowerCase().includes(q);
 }
 
-function stripPrefix(value: string, prefix: string): string {
-  return value.startsWith(prefix) ? value.slice(prefix.length) : value;
+function credentialScope(ctx: AdapterContext): string {
+  const token = ctx.credentials.accessToken;
+  if (!token) throw new PorterError("PROVIDER_UNAVAILABLE", "That business's booking system is not connected.");
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function validateIdempotencyKey(key: string): void {
+  if (!key || key.length > 255) {
+    throw new PorterError("INVALID_REQUEST", "The booking request needs a valid idempotency key.");
+  }
+}
+
+function appointmentDuration(startsAt: Date, endsAt: Date): number {
+  const minutes = (endsAt.getTime() - startsAt.getTime()) / 60_000;
+  if (!Number.isSafeInteger(minutes) || minutes <= 0) throw new PorterError("INVALID_REQUEST", "Choose a valid appointment duration.");
+  return minutes;
+}
+
+function assertSupportedBooking(profile: SquareBusinessBookingProfile, variation: MappedVariation): void {
+  if (profile.booking_enabled !== true || !profile.business_appointment_settings) {
+    throw new PorterError("PROVIDER_UNAVAILABLE", "Online booking is not configured for this business.");
+  }
+  if ((profile.business_appointment_settings.cancellation_fee_money?.amount ?? 0) > 0) {
+    throw new PorterError("POLICY_BLOCKED", "This business requires a cancellation fee and cannot be booked through Porter.");
+  }
+  if (!variation.service.price || variation.service.quoteRequired) {
+    throw new PorterError("QUOTE_REQUIRED", "This service needs a confirmed price before it can be booked.");
+  }
 }
 
 /** Beauty and wellness only. Square Appointments does not serve home trades. */

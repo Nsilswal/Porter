@@ -10,9 +10,9 @@
       "min_booking_lead_time_seconds": 3600,
       "max_booking_lead_time_seconds": 2592000,
       "cancellation_window_seconds": 86400,
-      "cancellation_fee_money": { "amount": 2500, "currency": "USD" },
+      "cancellation_fee_money": { "amount": 0, "currency": "USD" },
       "cancellation_policy": "CUSTOM_POLICY",
-      "cancellation_policy_text": "Free to cancel up to 24 hours before. After that a $25 fee applies."
+      "cancellation_policy_text": "Cancel or reschedule online up to 24 hours before your appointment. No cancellation fee."
     }
   }
 }
