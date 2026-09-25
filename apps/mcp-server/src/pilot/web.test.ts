@@ -43,7 +43,7 @@ describe.skipIf(!databaseUrl)("pilot browser authentication with PostgreSQL", ()
       revokeAuthorization: async () => undefined,
     } });
     web = new PilotWeb({ store, accounts, connections, config: { origin, environment: "sandbox", applicationId: "sandbox-application", applicationSecret: "test-secret",
-      email: { mode: "file", directory: "/unused" }, invitedEmails: [], operatorEmails: [] } });
+      email: { mode: "file", directory: "/unused" }, invitedEmails: [], operatorEmails: [], internalApiKeys: true } });
   });
 
   afterAll(async () => {

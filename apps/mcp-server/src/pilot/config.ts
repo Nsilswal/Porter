@@ -9,6 +9,9 @@ export interface PilotConfig {
   readonly email: { readonly mode: "file"; readonly directory: string } | { readonly mode: "resend"; readonly apiKey: string; readonly from: string };
   readonly invitedEmails: readonly string[];
   readonly operatorEmails: readonly string[];
+  /** Local integration testing only; never part of the customer setup journey. */
+  readonly internalApiKeys?: boolean;
+  readonly museConnectorUrl?: string;
 }
 
 /** Pilot startup is explicit and independent of the temporary global Square token. */
@@ -25,6 +28,13 @@ export function loadPilotConfig(env: NodeJS.ProcessEnv, issuer: string): PilotCo
   const applicationId = env.PORTER_SQUARE_APPLICATION_ID ?? "";
   const applicationSecret = env.PORTER_SQUARE_APPLICATION_SECRET ?? "";
   if (!applicationId || !applicationSecret) throw new Error("Square application ID and secret are required for merchant authorization");
+  const internalApiKeys = env.PORTER_INTERNAL_API_KEYS === "true";
+  if (internalApiKeys && (env.NODE_ENV === "production" || !loopback || environment !== "sandbox")) throw new Error("Internal API keys are restricted to local sandbox testing");
+  const museConnectorUrl = env.PORTER_MUSE_CONNECTOR_URL;
+  if (museConnectorUrl) {
+    const connectorUrl = new URL(museConnectorUrl);
+    if (connectorUrl.origin !== "https://muse.ai" || connectorUrl.username || connectorUrl.password || connectorUrl.hash) throw new Error("Use the approved Muse connector's HTTPS URL");
+  }
   const emailMode = env.PORTER_EMAIL_MODE ?? "file";
   let email: PilotConfig["email"];
   if (emailMode === "file") {
@@ -38,7 +48,8 @@ export function loadPilotConfig(env: NodeJS.ProcessEnv, issuer: string): PilotCo
     throw new Error("Configure sign-in email delivery with PORTER_EMAIL_MODE, PORTER_RESEND_API_KEY and PORTER_EMAIL_FROM");
   }
   return {
-    origin: issuer, environment, applicationId, applicationSecret, email,
+    origin: issuer, environment, applicationId, applicationSecret, email, internalApiKeys,
+    ...(museConnectorUrl ? { museConnectorUrl } : {}),
     invitedEmails: emailList(env.PORTER_PILOT_INVITED_EMAILS),
     operatorEmails: emailList(env.PORTER_OPERATOR_EMAILS),
   };

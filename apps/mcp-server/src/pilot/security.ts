@@ -61,6 +61,14 @@ export async function readPilotForm(req: IncomingMessage): Promise<URLSearchPara
   if (type !== "application/x-www-form-urlencoded") {
     throw new PilotHttpError(415, "unsupported_content_type", "Submit the form from Porter.");
   }
+  const form = new URLSearchParams(await readPilotBody(req));
+  for (const key of new Set(form.keys())) {
+    if (form.getAll(key).length !== 1) throw new PilotHttpError(400, "duplicate_field", "Submit each form field once.");
+  }
+  return form;
+}
+
+export async function readPilotBody(req: IncomingMessage): Promise<string> {
   const declared = req.headers["content-length"];
   if (declared && (!/^\d+$/.test(declared) || Number(declared) > 16_384)) {
     throw new PilotHttpError(413, "form_too_large", "That form is too large.");
@@ -79,11 +87,7 @@ export async function readPilotForm(req: IncomingMessage): Promise<URLSearchPara
   } finally {
     clearTimeout(timer);
   }
-  const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
-  for (const key of new Set(form.keys())) {
-    if (form.getAll(key).length !== 1) throw new PilotHttpError(400, "duplicate_field", "Submit each form field once.");
-  }
-  return form;
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 export function escapeHtml(value: string): string {

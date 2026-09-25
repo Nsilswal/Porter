@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isPresentAtLocation, mapServiceVariation, type SquareCatalogObject } from "@porter/adapter-square-appointments";
 import type { MerchantCredentials, PilotBusiness, PilotSession, PilotStore, SquareEnvironment } from "@porter/db";
 import { createFetchHttpClient, sanitize, type HttpClient, type HttpRequest } from "@porter/shared";
@@ -56,6 +57,24 @@ export interface ActivationSelection {
   readonly enabledServiceIds: readonly string[];
   readonly policyReviewed: boolean;
   readonly noPaymentObligations: boolean;
+}
+
+/**
+ * Binds the owner's displayed review to fresh authoritative values at activation.
+ * This is a stale-form check, not an authorization proof: eligibility and consent
+ * are still validated separately. Fetch time, token refreshes and API list order
+ * do not change the reviewed terms.
+ */
+export function catalogReviewDigest(review: OwnerCatalogReview): string {
+  const byId = <T extends { readonly id: string }>(values: readonly T[]): T[] => [...values].sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const selected = review.locations.find((location) => location.id === review.selectedLocationId);
+  return createHash("sha256").update(JSON.stringify({
+    businessId: review.businessId, merchantId: review.merchantId, selectedLocationId: review.selectedLocationId,
+    location: selected ? { ...selected, blockingReasons: [...selected.blockingReasons].sort() } : null,
+    services: byId(review.services).map((service) => ({ ...service, staffIds: [...service.staffIds].sort(), blockingReasons: [...service.blockingReasons].sort() })),
+    policy: { ...review.policy, blockingReasons: [...review.policy.blockingReasons].sort() },
+    blockingReasons: [...review.blockingReasons].sort(),
+  })).digest("hex");
 }
 export interface OwnerSquareCatalogOptions {
   readonly store: PilotStore;

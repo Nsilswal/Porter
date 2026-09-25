@@ -2,76 +2,85 @@
 
 Updated: 2026-09-25. Read this, [the PRD](product-prd.md), and [the implementation plan](implementation-plan.md).
 
-## Current instruction
+## Current instruction and product
 
-The user authorized continuing implementation, necessary clarifications, routine cleanup and a very high code-quality bar. The 24 product decisions are accepted; do not restart discovery. Persistence foundations and one scoped Square sandbox lifecycle are implemented; the self-serve product is not complete.
+The user authorizes continuing merchant **Continue with Square**, secure merchant connections, self-serve onboarding and the full Muse experience. Maintain a high quality bar, review every PR, test its committed state, and automatically merge when review and required checks pass. Deliver coherent increments that can be rolled back. This agreement is also in `AGENTS.md`.
 
-The user additionally authorizes opening PRs, reviewing every PR, and automatically merging to main when review and testing pass. Deliver incrementally so changes can be reverted independently. This agreement is also recorded in AGENTS.md.
+**Latest correction:** Porter will be published in Meta Muse's store/directory. Customers select Connect, sign in to Porter and consent through OAuth with PKCE. They never type an API key or endpoint. Merchant Square OAuth is separate. Directory approval and the actual store journey are launch dependencies; local SDK/browser tests do not establish Muse acceptance. Earlier custom-connector/API-key customer instructions are superseded.
 
-## Agreed product
+The accepted pilot is invited US Square salons/spas, one location per business, English/USD, pay at salon, one customer/service/appointment. Public website preview precedes email sign-in, official Square authorization, service/policy review and activation. Customers find a named salon and create/view/reschedule/cancel Porter-originated appointments with confirmation and live checks. Dashboards, synchronization, recovery, deletion/retention/support and rollout remain part of the agreed scope.
 
-Public salon/spa website import with anonymous preview, email-link owner sign-in, one reviewed profile and official **Continue with Square** authorization. Small free pilot: invited US Square businesses, one location each, English/USD. One Porter connector, separate customer credentials in Muse. Named-salon booking first; one customer/service/appointment with staff preference or any staff.
+Targets: three participating salons, ten genuine bookings, owner setup under five minutes when Square is configured, reschedule/cancel exercised, no retry-created duplicates. No deadline, hosting budget, domain or email provider has been selected.
 
-Activation means supported real appointments can be completed in Muse; pending results remain pending. Square controls booking terms; website content supplies descriptions with provenance. Pay at salon only; exclude unsupported fees/card/deposit/prepayment obligations without changing salon policies. View/reschedule/cancel Porter-created appointments with explicit confirmation, live rechecks, ownership isolation and durable retries. Owner/operator dashboards, synchronization, recovery, pause/disconnect, deletion/retention/support are in scope. Public Muse directory approval is separate.
+## Account and testing boundaries
 
-Goals: three participating salons, ten genuine bookings, owner setup under five minutes when Square is configured, reschedule/cancel exercised, no retry-created duplicates.
+- Mildred is reference only: https://mildred-101695.square.site/. No participating owner or production appointment/payment is authorized.
+- The user accepted Square Developer Terms. A Porter Sandbox developer app and dedicated synthetic Porter Pilot Salon seller are configured. Seven buyer scopes passed the raw adapter lifecycle; earlier test appointments were cancelled. See [sandbox validation](square-sandbox-validation.md).
+- Reuse authenticated browser sessions. Never put passwords, application secrets, grants, login URLs, bearer tokens or customer contacts in commits, logs or documentation.
+- Current Muse submission form/terms require Meta sign-in. The public platform page was checked on 2026-09-25 and confirms review before directory publication. Exact current callback/client requirements and published listing URL remain unverified. The user was asked to sign in; do not fabricate them.
 
-## New factual answers
+## Delivered increments
 
-- Mildred is **reference only**: https://mildred-101695.square.site/ . No participating owner or live appointment testing has been authorized.
-- There is no deadline, monthly budget, domain or preferred email provider yet. Use configurable low-cost local defaults.
-- The user accepted Square's Developer Terms. **Porter Sandbox** exists, and a dedicated **Porter Pilot Salon** US sandbox seller has Appointments enabled on the free plan. A $65, 30-minute service and bookable synthetic staff are configured.
-- Exactly the seven documented buyer scopes were authorized and verified through the token-status API. The final sandbox run passed discovery, slot recheck, confirmed creation, identical replay, occupancy check, time-only reschedule and cancellation. All three test appointments were independently retrieved as cancelled. See the [validation record](square-sandbox-validation.md) for setup, evidence and remaining checks. No production appointments or payments are authorized.
-- Credentials must never be copied to docs, code, logs or commits. Reuse the authenticated browser session if available.
+| PR | Outcome |
+|---|---|
+| [#2](https://github.com/Nsilswal/Porter/pull/2) | Secure legacy Railway demo; old public key disclosure removed. Subsequent rotation remains unverified. |
+| [#3](https://github.com/Nsilswal/Porter/pull/3)–[#5](https://github.com/Nsilswal/Porter/pull/5) | Square corrections, durable core PostgreSQL storage/confirmation/retry guards, server lifecycle and CI. |
+| [#6](https://github.com/Nsilswal/Porter/pull/6)–[#7](https://github.com/Nsilswal/Porter/pull/7) | Sandbox harness, recorded provider responses and buyer-mode lifecycle fixes. |
+| [#8](https://github.com/Nsilswal/Porter/pull/8) | Square OAuth client lifecycle. 425 tests. |
+| [#9](https://github.com/Nsilswal/Porter/pull/9) | Separate PilotStore v3, identities/sessions, encrypted merchant grants, exclusive disconnect claim. 449 tests. |
+| [#10](https://github.com/Nsilswal/Porter/pull/10) | Email sign-in, browser sessions, Square HTTP flow, initial pilot runtime. 493 tests. Initial customer keys are superseded by OAuth. |
+| [#11](https://github.com/Nsilswal/Porter/pull/11) | Bounded public-site importer, anonymous drafts v4, Square catalog review, guarded atomic activation. 648 tests. |
+| [#12](https://github.com/Nsilswal/Porter/pull/12) | Isolated merchant booking routing, name lookup, owned existing-booking management, fresh cancellation and final price/policy checks. 750 tests. |
+| [#13](https://github.com/Nsilswal/Porter/pull/13) | Customer OAuth storage v5 and protocol service, PKCE/resource bindings, refresh rotation/reuse detection, consent and owned revocation. 823 tests. |
 
-## Foundation work
+All merged increments above passed independent review, exact committed-state tests with PostgreSQL, GitHub CI and secret scanning. Next increment: public onboarding plus customer OAuth HTTP/UI wiring and accurate pilot/submission documentation. Check git/PR state for its final result before resuming.
 
-- PostgreSQL Store, explicit ordered/checksummed migrations, wrapped per-user encryption keys, key/schema startup validation, ownership constraints and health/shutdown lifecycle.
-- Durable confirmation consumption, completed-outcome replay after expiry/restart, uncertain-operation identities persisted before external writes. No blind retries or automatic reservation expiry.
-- Confirmations bind request fields and complete terms; signed payloads hold hashes instead of readable customer details.
-- Durable guards serialize existing-booking mutations even across distinct request IDs. Uncertain operations retain guards; operator reconciliation is still pending.
-- Square adapter fixes: phone requirement, actual catalog presence/pricing rules and pagination, fresh terms, credential-separated caches, known-fee/unresolved-price guards, full idempotency keys and honest missing results. Real sandbox testing added valid availability windows and sparse time-only rescheduling under buyer permissions. Explicitly marked recorded fixtures supplement the older synthetic fixtures.
-- Async server initialization, PostgreSQL selection from DATABASE_URL, stable secrets, memory limited to mock writes, readiness, bounded SSE shutdown, safer key verification and database-error logging.
-- Compose PostgreSQL, local/deployment guides, PostgreSQL CI and Docker context exclusions.
+## Current implementation and local evidence
 
-Details: [local development](local-development.md), [database notes](../packages/db/README.md), [Square contract](square-integration-contract.md).
+- Customer OAuth: public registration, metadata discovery, exact redirect/resource/client binding, S256, browser-bound pending authorization, explicit live-session consent, single-use codes, hashed opaque tokens, fixed refresh families and revocation. Names from dynamic registration are unverified and callback origins are shown. Access lasts 15 minutes; authorization request 20 minutes; code two minutes; refresh family 30 days. Retain replay hashes until family expiry; no automated cleanup yet.
+- Normal `/connect` UI explains the Muse directory connection and explicitly says publication is pending. No API key instructions. Optional internal keys default off and are confined to local nonproduction sandbox.
+- Onboarding imports a browser-bound draft, preserves it across sign-in, connects Square and reviews an authoritative catalog. Activation checks invitations, live session/grant, review version and catalog digest. Hidden draft/request fields prevent concurrent tabs from submitting another tab's preview or consent. Unknown Square policy fields remain unknown despite owner attestation.
+- Merchant facade selects credentials by owned business/location and persists immutable booking provenance. New bookings require an active reviewed business; paused businesses can still manage existing appointments while connected. Uncertain provider writes retain durable guards; operator reconciliation remains unfinished.
+- Live browser owner testing succeeded through email sign-in, real Square sandbox OAuth, catalog/location review and activation of the synthetic salon. Website `https://example.com` was a sandbox placeholder. Local business ID: `50c81c74-abf7-41ce-b06b-4a33f6cdd8b1`. Only the fixed $65/30-minute synthetic haircut is enabled; unpriced demo services were disabled.
+- Live local browser customer testing succeeded through explicit consent, automatic PKCE exchange, all six MCP tools, token refresh and revocation. The OAuth-authenticated pilot also completed real sandbox discovery, availability, confirmed create, identical replay, time-only reschedule and cancellation. Two synthetic appointments created during validation were cancelled; the first run stopped before rescheduling because of a temporary harness field-name error, then the corrected run passed. The local test client was named `Porter local OAuth test`, used a loopback callback and was disconnected after testing. This was **not an actual Muse connection**.
+- Browser fixes to preserve: `Referrer-Policy: strict-origin` permits native same-origin POST Origin checks without leaking URL paths/queries. Cross-origin OAuth handoffs use a 200 continuation page/normal link navigation; a POST→cross-origin 303 is blocked by Chromium `form-action 'self'` CSP.
+- Bounded HTML extraction does not execute website scripts. Rendered-page fallback and full extraction coverage remain open. See [Muse readiness](muse-compliance.md) for accurate capability and launch gaps.
 
-## Workspace and verification
+## Workspace and run commands
 
-- Repo: /Users/kavinsaravanan/Desktop/Projects/Porter.
-- Delivery: [PR #3](https://github.com/Nsilswal/Porter/pull/3) merged Square adapter corrections after independent review and 246 passing tests. [PR #4](https://github.com/Nsilswal/Porter/pull/4) merged the durable store/engine after independent review and 313 passing tests with PostgreSQL. [PR #5](https://github.com/Nsilswal/Porter/pull/5) merged server wiring, CI and these product documents after independent review, 324 passing tests, CI and Docker/MCP checks.
-- [PR #6](https://github.com/Nsilswal/Porter/pull/6) merged the sandbox-only smoke harness after independent review, 346 passing committed-state tests with PostgreSQL, CI and secret scanning. [PR #7](https://github.com/Nsilswal/Porter/pull/7) merged the sandbox API fixes and recorded responses after independent review, 371 passing tests and CI.
-- The user explicitly requested continuing merchant sign-in, secure merchant connections, onboarding and the full Muse experience. [PR #8](https://github.com/Nsilswal/Porter/pull/8) merged the provider-side `SquareOAuthClient` after independent review and 425 passing committed-state tests with PostgreSQL. Browser/session/storage integration is the next increment.
-- The separate `PilotStore` adds migration v3 for email identities, hashed browser-bound sign-in/session tokens, customer connector hashes, owner-scoped businesses, OAuth state tied to the connection generation, encrypted merchant grants and shared rate limits. A durable exclusive disconnect claim prevents overlapping full-grant revocations from invalidating a later reconnect. Unknown revocation outcomes remain blocked for operator reconciliation; no automatic takeover is allowed. See [database notes](../packages/db/README.md). Verify this increment's committed-state tests and merge status before proceeding.
-- Docker Desktop is running. `pnpm db:up` provides PostgreSQL 17 on 127.0.0.1:55432, database/user/password porter (local development only). `pnpm db:down` preserves the volume.
-- Ignored `.env.square-sandbox` holds only a scoped sandbox access token and sandbox origin, with mode 0600. Load it explicitly for the smoke command; never copy it into a commit or the demo deployment.
-- Ignored .env now uses local PostgreSQL and port **8081**, with generated stable signing/encryption secrets and restrictive file permissions. No secret values are documented. Another process already occupied 8080; do not kill it without identifying it.
-- Run `pnpm db:migrate` before `pnpm dev:mcp`. Never rewrite applied migration SQL. Migration v2 adds booking guards; v3 adds pilot identities/connections. The exact migration gate means rolling back application code after v3 requires retaining its migration ledger support or a reviewed database restore.
-- Run `TEST_DATABASE_URL=postgres://porter:porter@127.0.0.1:55432/porter pnpm test`. DB tests create/drop isolated schemas. Without TEST_DATABASE_URL they are skipped.
-- The combined foundation passed 324 tests across 21 files with real PostgreSQL, including HTTP/MCP restart and SSE shutdown checks. The Docker image builds from source with local secrets/build outputs excluded. Each PR must pass its own committed-state gate before merge; consult its validation record for the final reviewed commit.
-- Mock provider state still resets on restart. Durable Porter mock records remain readable, but old mock appointments cannot reliably be changed through a new mock adapter. Mock booking references are now unique across processes.
+Repo: `/Users/kavinsaravanan/Desktop/Projects/Porter`. Use `git status` before changing branches and preserve current work. Use `codex/` branch names. GitHub CLI authentication may require the existing private `/tmp/porter_gh.py` credential helper. Never print its credential. Per-command signing overrides may be necessary; do not change global Git settings.
 
-## Next work
+Docker PostgreSQL 17 is running on `127.0.0.1:55432`, local user/password `porter`. Tests use isolated schemas in database `porter`:
 
-Account/connection progress: [PR #9](https://github.com/Nsilswal/Porter/pull/9) merged the isolated pilot store after independent review, 449 passing committed-state tests, CI and secret scanning. The next increment adds browser-bound email links, persistent sessions, individual Muse keys, Square redirect/callback/refresh/disconnect orchestration and the six-tool pilot HTTP surface. See [pilot local development](pilot-local-development.md). Its tests use isolated PostgreSQL schemas; website import/activation and merchant routing remain separate changes. Verify that increment's review and merge state before treating it as delivered.
+```sh
+TEST_DATABASE_URL=postgres://porter:porter@127.0.0.1:55432/porter pnpm test
+```
 
-An ignored, mode-0600 `.env.pilot` is configured for a separate local `porter_pilot` database on port 8082. The Square sandbox callback `http://localhost:8082/square/callback` is registered. Run migration/start commands with this explicit environment file. The application's sandbox secret is stored locally and is never documented here. Actual browser OAuth, onboarding and Muse validation are still pending.
+Ignored mode-0600 `.env.pilot` configures separate database **porter_pilot**, port **8082**, stable signing/encryption keys, sandbox app credentials and private file email delivery. It has been migrated through v5. The registered Square callback is `http://localhost:8082/square/callback`.
 
-1. Integrate the OAuth client and pilot store into the owner HTTP flow, then test redirect/state, refresh/revocation, separate merchant isolation, policy variants and notification behavior. Basic account setup and the seven-scope lifecycle are complete. Sandbox API success does not establish production notification delivery or Muse behavior. The cancellation-policy UI failed in Square and omitted API fields remain unknown; activation must still require policy review.
-2. Complete Phase 1: owner/operator/customer identities, merchant connections/locations, encrypted provider token lifecycle, email-link sign-in and individual connector credentials. Static API keys/global provider tokens are still temporary.
-3. Implement reconciliation/operator recovery for uncertain operations and stuck guards.
-4. Build website import/onboarding, merchant-aware routing, explicit business-name lookup, narrow pilot capabilities, dashboards and synchronization/webhooks.
-   Buyer reschedules can only change time with the original service, staff and duration. Reject unsupported choices before confirmation; definite adapter rejections currently can retain conservative engine guards, so improve preflight/recovery without releasing guards after ambiguous writes.
-5. Test the actual Muse lifecycle with distinct customers, resolve retention/support/email/domain, then roll out a separate Railway pilot. No participating salon or live appointment/payment was authorized here.
+```sh
+pnpm build
+node --env-file=.env.pilot packages/db/dist/migrate.js
+node --env-file=.env.pilot apps/mcp-server/dist/index.js
+```
 
-## Git, Railway and security continuity
+Private sign-in mail is in ignored `.porter/mail`. Local customer validation scripts/artifacts, if present in `.porter`, are temporary development aids and are not a supported production client. Do not expose their tokens. Legacy ignored `.env` uses port8081/databaseporter; another unrelated process uses8080. Do not kill either indiscriminately. `.env.square-sandbox` contains the older scoped direct test token; whole-app merchant revocation can invalidate it.
 
-- PR [#2](https://github.com/Nsilswal/Porter/pull/2), **Prepare secure Railway demo for Muse connector testing**, is verified merged on 2026-09-23. This new feature branch is separate. No product changes deployed this session.
-- Railway project ideal-amazement has one production service, @porter/mcp-server, connected to Nsilswal/Porter main. The current running deployment is the earlier personal mock demo; a GitHub-triggered deployment was awaiting Railway approval when inspected. Merging main may queue further deployments. No manual Railway deploy or approval was performed. Endpoint: https://portermcp-server-production.up.railway.app/mcp . Verify deployment state before changing it.
-- Muse's API-key field takes the raw key; direct headers use Bearer authorization or X-API-Key.
-- The earlier public /docs key exposure was fixed. Subsequent key rotation is unconfirmed; resolve the old exposure before real-user credentials are shared.
-- GitHub CLI lacks direct login; system Git credentials were usable. Never print them. Prior commits needed a per-command signing override; do not alter global Git settings.
+Never rewrite applied migrations v1–v5. The exact migration ledger check means application rollback must retain all applied migration definitions or use a reviewed database restore. `pnpm db:down` preserves the local volume.
+
+## Next work and launch gates
+
+1. Finish/review/merge the onboarding and customer OAuth HTTP/UI increment, including exact-state tests and browser evidence. Verify pending PR state rather than repeating completed work.
+2. Extend the now-passing OAuth-authenticated sandbox lifecycle to Square refresh/disconnect/reconnect, multiple customers and merchants, policy variants and notifications. Verify actual Muse behavior separately.
+3. Implement owner booking history/counts, restricted operator recovery and reconciliation for uncertain writes/ambiguous revocation. Never release uncertain guards merely because time passed.
+4. Add verified Square webhooks/recovery sync and website refresh preserving owner edits. Complete deletion/request handling and settle retention/support/public policies.
+5. Verify authenticated Muse form, terms and callback/client requirements; configure the actual client/listing when provided. Test actual store connection, renewal/revocation and booking UX. Meta approval remains external.
+6. Deploy a separate HTTPS Railway pilot with PostgreSQL, verified email sender, accurate public privacy/terms/support pages, migration and restore checks. No participating production salon has been authorized yet.
+
+## Railway continuity
+
+The existing project `ideal-amazement` has one service, `@porter/mcp-server`, connected to `Nsilswal/Porter` main. Its running endpoint was the earlier personal mock demo at `https://portermcp-server-production.up.railway.app/mcp`; GitHub-triggered deployment approval was pending when last inspected. Merges may queue deployments. No manual Railway deployment or approval was performed during this increment. Verify current state before changing it, and keep pilot credentials separate. The previously disclosed demo key must be rotated before any reuse for real users.
 
 ## Document precedence
 
-The PRD is accepted scope, the implementation plan is execution/progress, and older prototype docs are historical where they conflict. Import/onboarding is authorized; actual source restrictions and provider requirements still apply. Do not declare pilot readiness from old milestone labels.
+The PRD records accepted scope, the implementation plan tracks remaining execution, and older prototype/legal/form captures are historical where they conflict. Building a local flow does not establish production readiness or Muse publication.

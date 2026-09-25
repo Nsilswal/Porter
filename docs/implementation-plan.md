@@ -1,6 +1,12 @@
 # Porter salon pilot — implementation plan
 
-Updated: 2026-09-24. Implementation authorized and delivered through incremental, reviewed and tested pull requests.
+Updated: 2026-09-25. Implementation authorized and delivered through incremental, reviewed and tested pull requests.
+
+## Updated customer connection requirement — 2026-09-25
+
+The product will be published in Meta Muse's store. Customers select Connect and authorize their Porter account through OAuth with PKCE. They never type an API key or endpoint. This supersedes the earlier private custom-connector setup below. Keep merchant Continue with Square independent of customer OAuth. Implement durable registered clients, browser-bound authorization requests, explicit signed-in consent, single-use codes, resource/audience validation, hashed access tokens, rotating refresh tokens with reuse detection, and grant revocation. The demo OAuth flow must stay disabled in the pilot. Muse directory approval and its actual connection journey are release gates, not optional later distribution.
+
+The API-key flow delivered in PR #10 is an internal validation path only. Remove it from the pilot's normal customer UI and public setup docs as the production OAuth flow is integrated. Inspect the current authenticated Muse submission form for actual callback/client requirements; do not invent those values. The public platform page was rechecked on 2026-09-25; protected form and current terms require Meta sign-in.
 
 The approved product requirements are in [product-prd.md](./product-prd.md). For session continuity, start with [session-handoff.md](./session-handoff.md).
 
@@ -8,21 +14,19 @@ The approved product requirements are in [product-prd.md](./product-prd.md). For
 
 The first change implements PostgreSQL storage and migrations, wrapped encryption keys, durable retry/confirmation state, stronger confirmation binding, Square adapter contract corrections, and startup/readiness/shutdown checks. See [local development](./local-development.md) and [the Square integration contract](./square-integration-contract.md).
 
-Phase 0 remains open for OAuth, policy variants, isolation, notifications and Muse validation. The user accepted the Developer Terms. The application and a dedicated sandbox seller now exist; the exact seven buyer scopes passed discovery, create, identical replay, time-only reschedule and cancellation. See the [sandbox validation record](square-sandbox-validation.md). The merchant OAuth redirect/refresh/revocation lifecycle remains unimplemented. Phase 1 remains open for merchant identities/connections, email sign-in, individual connector credential issuance, and reconciliation. Public onboarding and dashboards have not shipped. Do not label either phase complete based on the foundation tests.
+Phase 0 remains open for provider policy variants, notifications and actual Muse store validation. Square merchant OAuth and local browser authorization now work. Persistent accounts, isolated merchant grants, bounded website drafts, guarded activation, merchant routing and customer OAuth are implemented through PRs #8–#13. The next increment connects public onboarding and customer OAuth to the HTTP/UI surface. Operator recovery, dashboards, synchronization and rollout remain open. Do not label the pilot complete from automated tests alone.
 
 ## Current implementation and gaps
 
-| Area | Evidence in the repo | Work needed for the pilot |
+| Area | Implemented | Remaining pilot work |
 |---|---|---|
-| MCP server | `apps/mcp-server/src/app.ts`, `tools.ts` expose nine tools, API-key authentication and PostgreSQL storage. | Real customer identities/credential lifecycle, pilot-specific capability exposure and named-salon lookup. |
-| Booking engine | `packages/core/src/engine.ts` handles confirmations, slot rechecks, durable idempotency/guards and adapter routing. | Route through merchant-scoped connections and safely reconcile uncertain upstream writes. |
-| Persistence | `app.ts` now selects PostgreSQL from `DATABASE_URL`; explicit migrations and production stores are implemented in `packages/db`. | Add merchant/account records and reconciliation on top of durable booking/confirmation/retry storage. |
-| Merchant credentials | `apps/mcp-server/src/adapters.ts` reads a deployment-wide Square token; core indexes credentials by adapter ID. | Model many merchant connections and authorize each request against the correct merchant/location. |
-| Square adapter | `packages/adapters/square-appointments` passed one buyer-mode sandbox lifecycle and has recorded response regressions. | Extend validation to policy/price variants, notifications, isolation and recovery; implement the actual merchant OAuth journey. |
-| Public pages | `packages/adapters/web` reads pages; `square-public` contains experimental undocumented booking endpoints. | Build a reviewed import pipeline. Use the official Square integration for the pilot's booking contract. |
-| Product UI | No public onboarding, merchant dashboard, or operator console. | Build the approved journeys and account management. |
-| Search | Current `SearchArgs` requires category; there is no first-class business-name argument. | Add explicit active-business name/location lookup without relying on category matching. |
-| Deployment | Railway demo configuration and deployment guide exist. | Persistent pilot environment, migrations, recoverability, observability, and public product pages. |
+| Customer connection | Durable OAuth with PKCE, explicit account consent, hashed credentials, rotation/reuse detection and owned revocation. | Ship HTTP/UI wiring, verify exact Muse requirements and approved directory journey. |
+| Merchant connection | Email sign-in, official Square authorization, encrypted per-business grants, refresh and exclusive disconnect claim. | More real sandbox lifecycle/isolation tests and operator review for ambiguous revocation. |
+| Booking engine | Durable confirmations, retries/guards, merchant/location routing, named-salon lookup, fresh terms and owned mutation checks. | Reconcile uncertain external writes and validate actual Muse/provider notifications. |
+| Public onboarding | Bounded public-site importer, anonymous browser-bound drafts, Square catalog review and atomic activation. | Ship browser UI; extend extraction/rendered-page support with source restrictions. |
+| Product UI | Owner connection/profile/service controls, pause, salon share pages and customer consent are in the current increment. | Owner booking counts/history, operator console, account deletion and recovery. |
+| Synchronization | Live booking/terms/availability checks before operations. | Verified webhooks, recovery sync and website refresh preserving owner edits. |
+| Deployment | Local PostgreSQL pilot on port 8082; separate legacy Railway demo. | Separate public pilot, email sender, support/legal URLs, restore validation and Muse review. |
 
 ## Phase 0 — validate the integration contract
 
@@ -32,7 +36,7 @@ Start here when the user begins implementation. Inspect the current branch/PR st
 - Exercise one location/service through the official APIs: catalog, staff, availability, create, retrieve, update, cancel, refresh/revoke, and relevant webhook events. Use test resources; coordinate any real appointment with its participant.
 - Determine which configuration combinations truly qualify for the pay-at-salon pilot. Verify whether bookings confirm immediately and when notifications occur. Document unsupported or pending-confirmation cases explicitly.
 - Record sanitized fixtures from actual responses and compare them with the current adapter. Verify price ranges, staff selection, time zones, cancellation rules, and the documented non-zero-fee limitation.
-- Verify the current personal Muse integration with individual credentials. Define a reproducible customer setup path without assuming directory approval or automatic connector installation.
+- Verify the Muse directory connection with automatic customer OAuth, distinct identities, refresh and revocation. Confirm the authenticated submission form and callback/client requirements before claiming compatibility.
 - Check applicable provider/Muse terms and existing privacy/rights items against the proposed public-site import and merchant-authorized data use. Correct stale product claims in submission/legal docs before launch.
 
 Exit: a documented supported booking path, eligibility rules, tested response examples, and a Muse setup procedure. Missing account access is an external dependency to record; useful persistence/UI work can continue with fixtures without claiming live validation.
@@ -40,7 +44,7 @@ Exit: a documented supported booking path, eligibility rules, tested response ex
 ## Phase 1 — persistent identities and merchant routing
 
 - Introduce explicit owner/operator/customer roles, businesses, pilot invitations, selected locations, and merchant connections. An owner may have a customer role, but role boundaries remain explicit.
-- Implement email-link account access and individually issued/revocable customer connector credentials. Store credential hashes where verification permits; encrypt retrievable provider tokens and keep them out of logs/public docs.
+- Implement email-link account access and scoped customer OAuth grants with explicit consent, PKCE, refresh and revocation. Store credential hashes where verification permits; encrypt retrievable provider tokens and keep them out of logs/public docs.
 - Replace in-memory production stores with Postgres implementations. Persist booking references, pending/uncertain attempts, confirmation consumption, idempotency responses, account sessions, and audit outcomes with appropriate transactional constraints.
 - Review the existing schema before extending it: `linkedAccounts` is keyed by user/adapter, while the product needs merchant-owned connections independent of the customer making a booking.
 - Make routing, caches, provider identifiers, and webhook processing merchant-aware. The current single adapter/token wiring must not be reused across unrelated businesses.
@@ -87,7 +91,7 @@ Exit: owners and operators can detect, understand, and recover from ordinary fai
 
 - Continue using Railway; provision and wire Postgres, deploy migrations, and validate restore/restart behavior. Choose additional services only where required by the implementation and budget.
 - Keep the existing personal demo distinguishable from the real pilot. Recheck deployment source/branch rather than assuming the Railway project tracks GitHub.
-- Update public documentation, privacy/terms pages, and the submission packet to describe actual pilot capabilities. Treat directory review as a separate later release path.
+- Update public documentation, privacy/terms pages, and the submission packet to describe actual pilot capabilities. Complete Muse directory review and test the actual store connection before launch.
 - Before sharing real-user credentials, resolve the previously disclosed demo key exposure and ensure the current secret is not carried into the pilot. Never copy secrets into docs, commits, or public pages.
 - Run required build/tests and focused end-to-end checks for critical risks: merchant isolation, persistent retry protection, confirmation integrity, credential refresh, disconnected accounts, and supported provider policy combinations.
 - Onboard the first participating salon, then expand to the agreed three-salon cohort. Observe genuine customer bookings against the agreed targets.

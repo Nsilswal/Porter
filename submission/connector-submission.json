@@ -1,42 +1,31 @@
 {
   "_comment": [
-    "Values for the Muse Connector Platform form at https://muse.ai/platform.",
-    "Keys match the form's own submit payload exactly (createConnectorSubmissionAction),",
-    "recovered from the shipped PlatformSubmissionForm bundle and re-verified 2026-09-21.",
-    "Run `pnpm submission:validate` before pasting. It applies Muse's own client-side rules.",
-    "Anything still reading REPLACE_ME must be filled in by a human. Terms 2.1 requires the",
-    "submission to be true and accurate, so nothing here is guessed on your behalf."
+    "Draft values for the Muse Connector Platform form at https://muse.ai/platform.",
+    "Field names and local validator reflect a form captured on 2026-09-21; verify the current authenticated form before submission.",
+    "Updated 2026-09-25 for the required Muse store OAuth journey and six-tool salon pilot.",
+    "REPLACE_ME fields and attestations must be completed accurately; local validation does not establish approval."
   ],
-
   "productName": "Porter",
   "companyName": "REPLACE_ME_LEGAL_ENTITY_NAME",
   "website": "https://REPLACE_ME_DOMAIN",
-
-  "useCases": "Book a haircut on Thursday afternoon near me.\nFind a plumber who can come tomorrow for a leak under the kitchen sink.\nMy AC died — get someone out this week for under $300.\nMove my Thursday haircut to Friday afternoon.\nCancel my cleaning on Saturday and tell me if there's a fee.\nBook a deep clean for the flat before I move out on the 30th.\nWhat appointments do I have coming up?\nPay the deposit on my massage booking.",
-
-  "payments": "accepts_payments",
-
+  "useCases": "Find available haircut appointments at my salon this Thursday.\nShow the services offered by a participating spa.\nBook the time I selected after showing the full details.\nMove my Porter appointment to another time with the same service and staff.\nCancel my Porter appointment after showing the current cancellation terms.\nShow my upcoming Porter appointments.",
+  "payments": "does_not_accept_payments",
   "contactName": "REPLACE_ME_CONTACT_NAME",
   "contactEmail": "REPLACE_ME@REPLACE_ME_DOMAIN",
   "support": "support@REPLACE_ME_DOMAIN",
-
   "privacyUrl": "https://REPLACE_ME_DOMAIN/privacy",
   "productTerms": "https://REPLACE_ME_DOMAIN/terms",
-
   "connectionType": "MCP",
   "endpoint": "https://REPLACE_ME_DOMAIN/mcp",
   "documentationUrl": "https://REPLACE_ME_DOMAIN/docs",
   "openapi": "",
-
-  "authMethods": ["OAuth with PKCE", "API keys"],
+  "authMethods": [
+    "OAuth with PKCE"
+  ],
   "authOther": "",
-
-  "limits": "United States only at launch, in metropolitan areas where a connected booking platform has coverage. No Porter account or subscription is needed; the user connects the booking platform their chosen business already uses, and authorises it once. Porter covers beauty and home services only: hair, barbering, nails, waxing, massage, facials, plus plumbing, HVAC, electrical, cleaning, handyman, appliance repair, pest control and lawn care. Porter does not handle medical, health, legal or financial services. Rate limits are 60 requests per minute per user. Some businesses require a deposit before an appointment is held. Home-service jobs that need a site visit return a quote rather than a price, and the appointment stays pending until the business schedules it.",
-
-  "extraNotes": "Porter is a multi-business aggregator, not a single business's booking page. It integrates with the booking and field-service platforms that local businesses already run — Square Appointments and Jobber at launch, with Vagaro, Boulevard, Housecall Pro, ServiceTitan, Mindbody and MoeGo designed for — and normalises them behind one tool surface. We are stating this plainly because the connector's scope is wider than one merchant.\n\nThe tool surface is nine tools and nothing else: search_providers, get_availability, get_quote, create_booking, reschedule_booking, cancel_booking, list_my_bookings, pay_or_deposit and message_provider. There are no undisclosed functions and no undeclared endpoints.\n\nBounded action range: every tool that books, cancels with a fee, or charges money is two-phase. The first call changes nothing and returns a structured summary carrying the price, the frequency, the cancellation terms and any penalty. It commits only when the agent returns a signed, single-use confirmation token. The maximum single transaction is USD 2,000, and any amount at or above USD 200 is flagged in the summary as needing explicit approval. Porter never enters card details; payments run through Stripe Connect against a saved payment method, and Porter holds opaque references only.\n\nBusiness-supplied text (names, descriptions, messages) is treated as untrusted data and sanitised before it reaches the agent. A reviewer demo mode is available that exercises the full lifecycle against realistic sample businesses without touching a real merchant account — see the documentation URL for credentials.",
-
+  "limits": "Initial pilot: invited US salons and spas using Square Appointments, one location per business, English and USD. Customers connect Porter from the Muse store through Porter account sign-in and OAuth consent; no manual API key or endpoint setup. Merchant Square authorization is separate. Only reviewed, fixed-price services without unsupported card, deposit, prepayment, cancellation or no-show fee obligations qualify. Payment is at the salon. Time-only rescheduling preserves original staff, service and duration; other changes require contacting the salon. Only Porter-created appointments belonging to the connected customer can be managed. No payments, quotes, provider messaging, unrelated appointment history or medical services.",
+  "extraNotes": "Porter is one connector across active participating salons and spas, using merchant-authorized Square access. Owners import public website descriptions, review source provenance and missing fields, authorize Square, select a location and eligible services, then activate. The importer respects robots policy and uses bounded public HTML reads without running website scripts. Square supplies authoritative booking data.\n\nSix MCP tools: search_providers, get_availability, create_booking, list_my_bookings, reschedule_booking and cancel_booking. Creating, rescheduling and cancelling require a two-step confirmation with live rechecks. Pending or uncertain upstream results are not reported as confirmed appointments. Business-supplied text is untrusted data.\n\nProduction customer OAuth and the actual Muse store connection are implementation/validation gates. This packet is not ready for submission until those gates, deployment, public policies and the remaining factual fields are complete. Sandbox review uses synthetic test resources, with credentials handled through authorization; public documentation contains no secrets. Meta directory approval remains pending.",
   "brandFiles": "assets/porter-icon-512.png",
-
   "authorized": false,
   "termsAccepted": false,
   "distributionUnderstood": false

@@ -1,6 +1,6 @@
 # Porter salon pilot — product requirements
 
-Updated: 2026-09-24. Status: product recommendations accepted; foundation implementation in progress. Product scope below remains the agreed target, not a list of shipped features.
+Updated: 2026-09-25. Status: product recommendations accepted; foundation implementation in progress. Product scope below remains the agreed target, not a list of shipped features.
 
 The user approved the recommendations to all 24 discovery questions. This document records those decisions. Factual answers the user did not supply remain open; agreement with a recommendation does not supply credentials, a deadline, or a participating business.
 
@@ -29,7 +29,7 @@ The numbers correspond to the discovery questionnaire.
 | 7 | Square is authoritative for bookable services, prices, staff, availability, and booking rules. Website content supplies descriptive information. Show discrepancies; do not let a Porter edit silently override Square's booking terms. |
 | 8 | Require one editable owner review before activation. Show provenance and missing/uncertain data. Leave unknowns empty and resolve booking-critical gaps before enabling the affected service. |
 | 9 | Save unsupported or incomplete businesses as drafts with clear recovery steps. Do not activate a reduced booking-link experience as though it fulfills the product promise. |
-| 10 | Start with invited Muse testers using a short setup guide and individual Porter credentials. Public Muse directory submission is a separate milestone, not a prerequisite for the private pilot. |
+| 10 | **Updated 2026-09-25:** Publish Porter in Meta Muse's store/directory. Customers choose Connect there and complete secure Porter account authorization; they never paste an API key or endpoint. OAuth with PKCE replaces the custom-connector setup as the product journey. Meta review/approval is a launch dependency. |
 | 11 | One Porter connector covers all active businesses. Give each salon a share page explaining how to connect Porter and ask Muse to book that salon. |
 | 12 | Prioritize booking a named salon, with basic name/location lookup. Defer broad local recommendations, marketplace ranking, and comparison shopping. |
 | 13 | One customer, one service, one appointment. Support choosing a staff member or any available staff member. Resolve the selected service's price and duration before confirmation. Defer bundles, multiple services, recurring and group/couples bookings. |
@@ -64,7 +64,7 @@ Suggested states: importing, draft, needs information, needs Square connection, 
 
 ### Customer booking
 
-1. An invited customer creates a Porter identity and connects Porter to Muse using their own credential.
+1. The customer finds Porter in the Muse store and selects Connect. Muse opens Porter's account sign-in and explicit consent flow, then receives scoped OAuth credentials automatically. No manual API key or endpoint entry is part of this journey.
 2. The customer names an active salon; Muse retrieves its eligible services through Porter.
 3. Resolve service, staff preference, local appointment time, duration, price, and required contact information.
 4. Retrieve live availability and present a specific appointment with applicable terms.
@@ -72,7 +72,7 @@ Suggested states: importing, draft, needs information, needs Square connection, 
 6. Return the provider's actual outcome and booking reference. Report pending or uncertain states honestly; a request being sent is not proof of a confirmed booking.
 7. Allow the customer to list, reschedule, or cancel their Porter-created appointments subject to the same ownership and confirmation rules.
 
-Merchant Square authorization and customer Muse credentials serve different purposes. Never reuse a salon credential as a customer's connector credential or share one demo user across pilot customers.
+Merchant Square authorization and customer Muse authorization serve different purposes. Owners use Continue with Square; customers connect from the Muse store through Porter OAuth. Never reuse a salon grant as a customer's grant or share one demo identity across customers. The previously built API-key flow is an internal testing path, not the customer-facing product.
 
 ### Owner operation and recovery
 
@@ -93,7 +93,7 @@ Operators can diagnose failures without exposing secrets or unrelated customer d
 - Retry, timeout, and process-restart paths do not produce duplicate bookings or lose the ability to reconcile a submitted request.
 - Bookings, identities, credentials, confirmation consumption, and retry records persist across deployment/restart. Adding a database without using it does not meet this criterion.
 - Reschedule/cancel results reflect Square. Existing Square appointments survive Porter disconnection and data deletion.
-- The supported journey is exercised inside Muse with individual customer credentials. SDK/HTTP tests alone do not establish the Muse user experience.
+- The supported journey is exercised through Muse's store connection with distinct customer identities, automatic OAuth authorization, refresh and revocation. No customer handles an API key. SDK/HTTP tests alone do not establish the Muse user experience.
 - Pilot and demo environments/data remain distinguishable. A demo payment or mock appointment can never be shown as a real pilot result.
 - Owners can request data deletion and understand what remains with Square; support can explain an incident without logging credentials or unnecessary customer details.
 
@@ -133,3 +133,4 @@ These facts do not require reopening accepted product decisions. Record new answ
 - Buyer permissions support time-only rescheduling with the original staff, service and duration. Staff/service changes need a salon contact route in the pilot; do not silently broaden permissions or cancel/recreate appointments.
 - There is no launch deadline, monthly budget, domain or preferred email provider yet. Keep low-cost local defaults and make deployment settings configurable.
 - Authentication credentials are excluded from these documents and from source control.
+- On 2026-09-25 the user clarified that public Muse store distribution and a keyless connection flow are required. This supersedes the earlier custom-connector/individual API-key pilot setup. Directory approval remains external; building the integration does not imply approval.

@@ -12,7 +12,7 @@ import type { PorterConfig } from "../config.js";
 import { opaqueToken } from "./security.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
-describe.skipIf(!databaseUrl)("pilot runtime and Muse credentials", () => {
+describe.skipIf(!databaseUrl)("pilot runtime and internal test credentials", () => {
   const schema = `porter_pilot_http_${randomUUID().replaceAll("-", "")}`;
   const apps: PorterApp[] = [];
   let settings: Partial<PorterConfig>;
@@ -31,7 +31,7 @@ describe.skipIf(!databaseUrl)("pilot runtime and Muse credentials", () => {
       demoMode: false, devOAuthEnabled: false, apiKeys: {}, logLevel: "error",
       squareAccessToken: undefined, jobberAccessToken: undefined, stripeSecretKey: undefined, webSourcesPath: undefined, squarePublicSourcesPath: undefined,
       pilot: { origin: "http://localhost:8082", environment: "sandbox", applicationId: "sandbox-test-application", applicationSecret: "application-secret-for-tests",
-        email: { mode: "file", directory }, invitedEmails: [], operatorEmails: [] },
+        email: { mode: "file", directory }, invitedEmails: [], operatorEmails: [], internalApiKeys: true },
     };
   });
 
@@ -74,7 +74,7 @@ describe.skipIf(!databaseUrl)("pilot runtime and Muse credentials", () => {
     const user = await credential(app);
     const tools = await withClient(origin, user.key, async (client) => (await client.listTools()).tools.map((tool) => tool.name));
     expect(tools.sort()).toEqual(["cancel_booking", "create_booking", "get_availability", "list_my_bookings", "reschedule_booking", "search_providers"]);
-    expect((await fetch(`${origin}/oauth/authorize`)).status).toBe(404);
+    expect((await fetch(`${origin}/oauth/authorize`)).status).toBe(400);
     expect((await fetch(`${origin}/mcp`, { headers: { Authorization: "Bearer demo-key" } })).status).toBe(401);
     expect((await fetch(`${origin}/mcp`, { headers: { Cookie: `porter_session=${user.sessionToken}` } })).status).toBe(401);
     const metadata = await (await fetch(`${origin}/.well-known/oauth-protected-resource`)).json() as { scopes_supported: string[] };
