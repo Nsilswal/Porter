@@ -33,7 +33,7 @@ Targets: three participating salons, ten genuine bookings, owner setup under fiv
 | [#12](https://github.com/Nsilswal/Porter/pull/12) | Isolated merchant booking routing, name lookup, owned existing-booking management, fresh cancellation and final price/policy checks. 750 tests. |
 | [#13](https://github.com/Nsilswal/Porter/pull/13) | Customer OAuth storage v5 and protocol service, PKCE/resource bindings, refresh rotation/reuse detection, consent and owned revocation. 823 tests. |
 
-All merged increments above passed independent review, exact committed-state tests with PostgreSQL, GitHub CI and secret scanning. Next increment: public onboarding plus customer OAuth HTTP/UI wiring and accurate pilot/submission documentation. Check git/PR state for its final result before resuming.
+All merged increments above passed independent review, exact committed-state tests with PostgreSQL, GitHub CI and secret scanning. [PR #14](https://github.com/Nsilswal/Porter/pull/14) contains public onboarding, customer OAuth HTTP/UI wiring and accurate pilot/submission documentation. The integrated workspace passed 850 tests across 43 files with PostgreSQL, plus the browser/Square checks below. Consult the PR for final committed-state checks and merge status before resuming.
 
 ## Current implementation and local evidence
 
@@ -48,7 +48,7 @@ All merged increments above passed independent review, exact committed-state tes
 
 ## Workspace and run commands
 
-Repo: `/Users/kavinsaravanan/Desktop/Projects/Porter`. Use `git status` before changing branches and preserve current work. Use `codex/` branch names. GitHub CLI authentication may require the existing private `/tmp/porter_gh.py` credential helper. Never print its credential. Per-command signing overrides may be necessary; do not change global Git settings.
+Repo: `/Users/kavinsaravanan/Desktop/Projects/Porter`. Use `git status` before changing branches and preserve current work. Three unexpected untracked duplicate Square fixture/test files ending in ` 2` appeared during integration work; they were left untouched and excluded from PR #14. Use `codex/` branch names. GitHub CLI authentication may require the existing private `/tmp/porter_gh.py` credential helper. Never print its credential. Per-command signing overrides may be necessary; do not change global Git settings.
 
 Docker PostgreSQL 17 is running on `127.0.0.1:55432`, local user/password `porter`. Tests use isolated schemas in database `porter`:
 

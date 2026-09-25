@@ -14,16 +14,16 @@ The approved product requirements are in [product-prd.md](./product-prd.md). For
 
 The first change implements PostgreSQL storage and migrations, wrapped encryption keys, durable retry/confirmation state, stronger confirmation binding, Square adapter contract corrections, and startup/readiness/shutdown checks. See [local development](./local-development.md) and [the Square integration contract](./square-integration-contract.md).
 
-Phase 0 remains open for provider policy variants, notifications and actual Muse store validation. Square merchant OAuth and local browser authorization now work. Persistent accounts, isolated merchant grants, bounded website drafts, guarded activation, merchant routing and customer OAuth are implemented through PRs #8–#13. The next increment connects public onboarding and customer OAuth to the HTTP/UI surface. Operator recovery, dashboards, synchronization and rollout remain open. Do not label the pilot complete from automated tests alone.
+Phase 0 remains open for provider policy variants, notifications and actual Muse store validation. Square merchant OAuth and local browser authorization now work. Persistent accounts, isolated merchant grants, bounded website drafts, guarded activation, merchant routing and customer OAuth are implemented through PRs #8–#13. [PR #14](https://github.com/Nsilswal/Porter/pull/14) connects public onboarding and customer OAuth to the HTTP/UI surface; check its final merge state. Operator recovery, dashboards, synchronization and rollout remain open. Do not label the pilot complete from automated tests alone.
 
 ## Current implementation and gaps
 
 | Area | Implemented | Remaining pilot work |
 |---|---|---|
-| Customer connection | Durable OAuth with PKCE, explicit account consent, hashed credentials, rotation/reuse detection and owned revocation. | Ship HTTP/UI wiring, verify exact Muse requirements and approved directory journey. |
+| Customer connection | Durable OAuth with PKCE, explicit account consent, hashed credentials, rotation/reuse detection and owned revocation. | Verify the HTTP/UI PR merge, exact Muse requirements and approved directory journey. |
 | Merchant connection | Email sign-in, official Square authorization, encrypted per-business grants, refresh and exclusive disconnect claim. | More real sandbox lifecycle/isolation tests and operator review for ambiguous revocation. |
 | Booking engine | Durable confirmations, retries/guards, merchant/location routing, named-salon lookup, fresh terms and owned mutation checks. | Reconcile uncertain external writes and validate actual Muse/provider notifications. |
-| Public onboarding | Bounded public-site importer, anonymous browser-bound drafts, Square catalog review and atomic activation. | Ship browser UI; extend extraction/rendered-page support with source restrictions. |
+| Public onboarding | Bounded public-site importer, anonymous browser-bound drafts, Square catalog review and atomic activation. | Verify browser UI PR merge; extend extraction/rendered-page support with source restrictions. |
 | Product UI | Owner connection/profile/service controls, pause, salon share pages and customer consent are in the current increment. | Owner booking counts/history, operator console, account deletion and recovery. |
 | Synchronization | Live booking/terms/availability checks before operations. | Verified webhooks, recovery sync and website refresh preserving owner edits. |
 | Deployment | Local PostgreSQL pilot on port 8082; separate legacy Railway demo. | Separate public pilot, email sender, support/legal URLs, restore validation and Muse review. |
