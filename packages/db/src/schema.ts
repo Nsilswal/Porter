@@ -307,3 +307,19 @@ export const pilotRateLimits = pgTable("pilot_rate_limits", {
   count: integer("count").notNull(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
 }, (t) => ({ pk: primaryKey({ columns: [t.keyHash, t.windowStart] }), byExpiry: index("pilot_rate_limits_expiry_idx").on(t.expiresAt) }));
+
+/** Public website snapshots are browser-bound until a verified owner claims them. */
+export const importDrafts = pgTable("import_drafts", {
+  tokenHash: text("token_hash").primaryKey(),
+  browserNonceHash: text("browser_nonce_hash").notNull(),
+  sourceUrl: text("source_url").notNull(),
+  preview: jsonb("preview").$type<Record<string, unknown>>().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  claimedOwnerId: text("claimed_owner_id"),
+  claimedBusinessId: text("claimed_business_id"),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  owner: foreignKey({ columns: [t.claimedOwnerId, t.claimedBusinessId], foreignColumns: [pilotBusinesses.ownerId, pilotBusinesses.id] }).onDelete("cascade"),
+  byExpiry: index("import_drafts_expiry_idx").on(t.expiresAt),
+}));

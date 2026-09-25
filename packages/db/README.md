@@ -27,6 +27,7 @@ Do not use `drizzle-kit push` as a deployment step: it bypasses this migration l
 - Merchant access and refresh tokens use AES-256-GCM with authenticated context containing the business, environment, and merchant. Ordinary connection views exclude tokens and ciphertext. Only explicit server-only credential methods decrypt them. Expired access tokens remain available for refresh; disconnected and reconnect-required grants do not route requests.
 - Refresh uses a version compare-and-swap. OAuth callbacks must present the version saved at authorization start. A disconnect first pauses the business, blocks routing and refresh, and durably retains encrypted revocation credentials. Only the first caller receives credentials for the remote revocation attempt. After Square confirms revocation, finishing the disconnect clears ciphertext. An interrupted or uncertain revocation requires operator reconciliation; it never retries automatically. This prevents a delayed duplicate revocation from revoking a newly authorized grant. A new authorization cannot replace a pending revocation.
 - Shared fixed-window rate limits persist only namespaced key hashes. The caller must use a distinct namespace for each policy and supply server time. Expired rate windows, login tokens, sessions, and OAuth states are safe to prune once their expiry has passed; automated retention cleanup is not implemented here.
+- Anonymous website imports store a public preview of at most 64 KiB with a hashed draft token and browser nonce. The application supplies a 24-hour expiry and the validated submitted website URL. Claiming requires the same browser and a current owner session; a transaction creates one draft business using the stored URL and original preview. Concurrent same-owner retries return that business, while other owners cannot claim it. Anonymous reads hide expired or claimed drafts. Unclaimed expired drafts can be pruned without deleting businesses; claimed records retain retry identity until their business is deleted.
 
 Authorization, secure cookies, email delivery, consent, OAuth protocol validation, and provider revocation belong to the application layer. Do not expose server-only store methods directly as HTTP endpoints. Revoke external grants before soft-deleting an owner so recovery can still resolve the owner and business.
 
@@ -44,7 +45,7 @@ Authorization, secure cookies, email delivery, consent, OAuth protocol validatio
 The storage contract runs against memory on every test run. Set `TEST_DATABASE_URL` to an expendable PostgreSQL database to also run real concurrency, restart, migration, ownership, and encryption checks:
 
 ```sh
-TEST_DATABASE_URL=postgres://porter:porter@127.0.0.1:55432/porter pnpm exec vitest run packages/db/src/store.test.ts packages/db/src/pilot.test.ts
+TEST_DATABASE_URL=postgres://porter:porter@127.0.0.1:55432/porter pnpm exec vitest run packages/db/src/store.test.ts packages/db/src/pilot.test.ts packages/db/src/import-drafts.test.ts
 ```
 
 Tests create and delete uniquely named schemas. They require schema-creation privileges and do not mutate application tables in the default schema. Without `TEST_DATABASE_URL`, PostgreSQL cases are explicitly skipped; a passing memory-only run does not verify PostgreSQL.

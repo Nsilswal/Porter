@@ -83,6 +83,14 @@ export interface PilotStore {
     /** Fixed windows shared by all processes. Only the namespace/key hash is persisted. */
     take(input: { keyHash: string; limit: number; windowMs: number; now: Date }): Promise<boolean>;
   };
+  readonly imports: {
+    /** Stores a bounded public-website snapshot before email sign-in. URL is server-derived. */
+    put(input: { tokenHash: string; browserNonceHash: string; sourceUrl: string; preview: Record<string, unknown>; expiresAt: Date }): Promise<void>;
+    /** Claimed and expired drafts are never returned to an anonymous caller. */
+    get(tokenHash: string, browserNonceHash: string, now: Date): Promise<Record<string, unknown> | null>;
+    /** Creates one business atomically. A same-owner retry returns the original business. */
+    claim(input: { tokenHash: string; browserNonceHash: string; ownerId: string; sessionHash: string; businessId: string; name: string; now: Date }): Promise<PilotBusiness | null>;
+  };
   readonly identities: {
     getOrCreate(email: string): Promise<EmailIdentity>;
     get(userId: string): Promise<EmailIdentity | null>;
@@ -110,6 +118,9 @@ export interface PilotStore {
     list(ownerId: string): Promise<PilotBusiness[]>;
     /** The first selected location is permanent for this business, including reconnects. */
     update(ownerId: string, businessId: string, input: { name?: string; profile?: Record<string, unknown>; status?: BusinessStatus; selectedLocationId?: string }): Promise<PilotBusiness | null>;
+    /** Commits a freshly validated owner review only if the session, business and Square grant still match. */
+    activate(input: { ownerId: string; sessionHash: string; businessId: string; environment: SquareEnvironment;
+      connectionVersion: number; expectedUpdatedAt: Date; name: string; profile: Record<string, unknown>; now: Date }): Promise<PilotBusiness | null>;
     /** Server-only routing; exposes active businesses, never merchant credentials. */
     listActive(): Promise<PilotBusiness[]>;
   };

@@ -5,21 +5,22 @@
   "type": "module",
   "main": "./dist/index.js",
   "dependencies": {
-    "@porter/shared": "workspace:*",
-    "@porter/core": "workspace:*",
-    "@porter/adapter-contract": "workspace:*",
-    "@porter/adapter-mock": "workspace:*",
-    "@porter/db": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.12.0",
-    "zod": "^3.24.1",
-    "@porter/adapter-square-appointments": "workspace:*",
+    "@porter/adapter-contract": "workspace:*",
     "@porter/adapter-jobber": "workspace:*",
-    "@porter/payments-stripe": "workspace:*",
+    "@porter/adapter-mock": "workspace:*",
+    "@porter/adapter-square-appointments": "workspace:*",
+    "@porter/adapter-square-public": "workspace:*",
     "@porter/adapter-web": "workspace:*",
-    "@porter/adapter-square-public": "workspace:*"
+    "@porter/core": "workspace:*",
+    "@porter/db": "workspace:*",
+    "@porter/payments-stripe": "workspace:*",
+    "@porter/shared": "workspace:*",
+    "parse5": "^8.0.1",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
-    "pg": "^8.13.1",
-    "@types/pg": "^8.11.10"
+    "@types/pg": "^8.11.10",
+    "pg": "^8.13.1"
   }
 }

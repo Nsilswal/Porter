@@ -137,6 +137,21 @@ CREATE TABLE pilot_rate_limits (
 );
 CREATE INDEX pilot_rate_limits_expiry_idx ON pilot_rate_limits(expires_at);
 `,
+}, {
+  version: 4,
+  sql: `
+CREATE TABLE import_drafts (
+  token_hash text PRIMARY KEY CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+  browser_nonce_hash text NOT NULL CHECK (browser_nonce_hash ~ '^[0-9a-f]{64}$'),
+  source_url text NOT NULL, preview jsonb NOT NULL CHECK (jsonb_typeof(preview) = 'object'),
+  expires_at timestamptz NOT NULL, claimed_owner_id text, claimed_business_id text, claimed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (claimed_owner_id, claimed_business_id) REFERENCES pilot_businesses(owner_id, id) ON DELETE CASCADE,
+  CHECK ((claimed_owner_id IS NULL AND claimed_business_id IS NULL AND claimed_at IS NULL)
+    OR (claimed_owner_id IS NOT NULL AND claimed_business_id IS NOT NULL AND claimed_at IS NOT NULL))
+);
+CREATE INDEX import_drafts_expiry_idx ON import_drafts(expires_at);
+`,
 }] as const;
 
 function checksum(sql: string): string {

@@ -25,6 +25,11 @@ function connectionWhere(businessId: string, environment: SquareEnvironment) {
   return and(eq(schema.merchantConnections.businessId, businessId), eq(schema.merchantConnections.environment, environment));
 }
 
+/** JavaScript dates retain milliseconds. Every business mutation advances the CAS timestamp. */
+function nextBusinessUpdate() {
+  return sql<Date>`greatest(date_trunc('milliseconds', clock_timestamp()), date_trunc('milliseconds', ${schema.pilotBusinesses.updatedAt}) + interval '1 millisecond')`;
+}
+
 function connectionView(row: typeof schema.merchantConnections.$inferSelect): MerchantConnection {
   const { credentialCipher: _cipher, ...view } = row;
   return view;
@@ -93,6 +98,54 @@ export async function createPilotStore(options: PilotStoreOptions): Promise<Pilo
           set: { count: sql`${schema.pilotRateLimits.count} + 1` }, setWhere: lt(schema.pilotRateLimits.count, input.limit),
         }).returning({ count: schema.pilotRateLimits.count });
         return rows.length === 1;
+      },
+    },
+    imports: {
+      async put(input) {
+        hash(input.tokenHash); hash(input.browserNonceHash); date(input.expiresAt);
+        const url = new URL(input.sourceUrl);
+        if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("Invalid import source URL");
+        if (!input.preview || typeof input.preview !== "object" || Array.isArray(input.preview)) throw new Error("Import preview must be a JSON object");
+        const serialized = JSON.stringify(input.preview);
+        if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > 65_536) throw new Error("Import preview exceeds 64 KiB");
+        const preview = JSON.parse(serialized) as Record<string, unknown>;
+        if (!preview || typeof preview !== "object" || Array.isArray(preview)) throw new Error("Import preview must be a JSON object");
+        await db.insert(schema.importDrafts).values({ tokenHash: input.tokenHash, browserNonceHash: input.browserNonceHash,
+          sourceUrl: url.href, preview, expiresAt: input.expiresAt });
+      },
+      async get(tokenHash, browserNonceHash, now) {
+        hash(tokenHash); hash(browserNonceHash); date(now);
+        const [row] = await db.select({ preview: schema.importDrafts.preview }).from(schema.importDrafts).where(and(
+          eq(schema.importDrafts.tokenHash, tokenHash), eq(schema.importDrafts.browserNonceHash, browserNonceHash),
+          isNull(schema.importDrafts.claimedOwnerId), gt(schema.importDrafts.expiresAt, now),
+        ));
+        return row?.preview ?? null;
+      },
+      async claim(input) {
+        hash(input.tokenHash); hash(input.browserNonceHash); hash(input.sessionHash); date(input.now);
+        nonempty(input.businessId); nonempty(input.name);
+        return db.transaction(async (tx) => {
+          if (!await liveUser(tx, input.ownerId) || !await liveSession(tx, input.ownerId, input.sessionHash, input.now)) return null;
+          const [draft] = await tx.select().from(schema.importDrafts).where(and(
+            eq(schema.importDrafts.tokenHash, input.tokenHash), eq(schema.importDrafts.browserNonceHash, input.browserNonceHash),
+          )).for("update");
+          if (!draft) return null;
+          if (draft.claimedOwnerId) {
+            if (draft.claimedOwnerId !== input.ownerId || !draft.claimedBusinessId) return null;
+            const [existing] = await tx.select().from(schema.pilotBusinesses).where(and(
+              eq(schema.pilotBusinesses.ownerId, input.ownerId), eq(schema.pilotBusinesses.id, draft.claimedBusinessId),
+            ));
+            return existing ?? null;
+          }
+          if (draft.expiresAt <= input.now) return null;
+          const [business] = await tx.insert(schema.pilotBusinesses).values({
+            id: input.businessId, ownerId: input.ownerId, name: input.name, websiteUrl: draft.sourceUrl,
+            profile: { imported: draft.preview },
+          }).returning();
+          await tx.update(schema.importDrafts).set({ claimedOwnerId: input.ownerId, claimedBusinessId: input.businessId, claimedAt: input.now })
+            .where(eq(schema.importDrafts.tokenHash, input.tokenHash));
+          return business!;
+        });
       },
     },
     identities: {
@@ -219,11 +272,38 @@ export async function createPilotStore(options: PilotStoreOptions): Promise<Pilo
         if (input.name !== undefined) nonempty(input.name);
         return db.transaction(async (tx) => {
           if (!await liveUser(tx, ownerId)) return null;
-          const [row] = await tx.update(schema.pilotBusinesses).set({ ...input, updatedAt: new Date() }).where(and(
+          const [row] = await tx.update(schema.pilotBusinesses).set({ ...input, updatedAt: nextBusinessUpdate() }).where(and(
             eq(schema.pilotBusinesses.ownerId, ownerId), eq(schema.pilotBusinesses.id, businessId),
             input.selectedLocationId === undefined ? undefined : or(isNull(schema.pilotBusinesses.selectedLocationId), eq(schema.pilotBusinesses.selectedLocationId, input.selectedLocationId)),
           )).returning();
           return row ?? null;
+        });
+      },
+      async activate(input) {
+        hash(input.sessionHash); date(input.expectedUpdatedAt); date(input.now); nonempty(input.name);
+        const enabled = input.profile?.enabledServiceIds;
+        if (!Number.isSafeInteger(input.connectionVersion) || input.connectionVersion < 1 ||
+          input.profile?.policyReviewed !== true || input.profile?.noPaymentObligations !== true ||
+          !Array.isArray(enabled) || enabled.length < 1 || enabled.length > 500 ||
+          enabled.some((id) => typeof id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(id)) || new Set(enabled).size !== enabled.length) {
+          throw new Error("Business activation requires a validated service and policy review");
+        }
+        return db.transaction(async (tx) => {
+          if (!await liveUser(tx, input.ownerId) || !await liveSession(tx, input.ownerId, input.sessionHash, input.now)) return null;
+          const [business] = await tx.select().from(schema.pilotBusinesses).where(and(
+            eq(schema.pilotBusinesses.id, input.businessId), eq(schema.pilotBusinesses.ownerId, input.ownerId),
+            eq(schema.pilotBusinesses.updatedAt, input.expectedUpdatedAt),
+          )).for("update");
+          if (!business?.selectedLocationId) return null;
+          const [connection] = await tx.select().from(schema.merchantConnections).where(and(
+            connectionWhere(input.businessId, input.environment), eq(schema.merchantConnections.version, input.connectionVersion),
+            eq(schema.merchantConnections.status, "connected"), gt(schema.merchantConnections.expiresAt, input.now),
+          )).for("share");
+          if (!connection) return null;
+          const [updated] = await tx.update(schema.pilotBusinesses).set({
+            name: input.name, profile: input.profile, status: "active", updatedAt: nextBusinessUpdate(),
+          }).where(eq(schema.pilotBusinesses.id, business.id)).returning();
+          return updated!;
         });
       },
       async listActive() {
@@ -324,7 +404,7 @@ export async function createPilotStore(options: PilotStoreOptions): Promise<Pilo
           if (!business) return null;
           const [connection] = await tx.select().from(schema.merchantConnections).where(connectionWhere(businessId, environment)).for("update");
           if (!connection || connection.status === "disconnected" || connection.status === "disconnecting") return null;
-          await tx.update(schema.pilotBusinesses).set({ status: "paused", updatedAt: new Date() }).where(eq(schema.pilotBusinesses.id, businessId));
+          await tx.update(schema.pilotBusinesses).set({ status: "paused", updatedAt: nextBusinessUpdate() }).where(eq(schema.pilotBusinesses.id, businessId));
           const [row] = await tx.update(schema.merchantConnections).set({ status: "disconnecting",
             updatedAt: new Date(), version: connection.version + 1,
           }).where(connectionWhere(businessId, environment)).returning();
