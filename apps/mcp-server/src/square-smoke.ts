@@ -1,324 +1,325 @@
 /**
- * Square sandbox smoke test.
- *
- *   PORTER_SQUARE_ACCESS_TOKEN=EAAA... pnpm square:smoke
- *
- * Runs the real Square adapter against Square's real sandbox API and reports
- * what actually holds. This is the test that matters: the adapter and its
- * fixtures were written from Square's published documentation, not recorded
- * from live traffic, so until this passes the mapping is believed, not known.
- *
- * It creates a booking and then cancels it. Sandbox only by default; pointing
- * it at production takes a deliberate flag.
+ * Exercise one synthetic booking against Square sandbox: pnpm square:smoke.
+ * Requires PORTER_SQUARE_ACCESS_TOKEN and configured Appointments services.
+ * Cancels every observed booking in finally; synthetic customer records remain.
  */
-import { createFetchHttpClient, createLogger, PorterError, silentLogger } from "@porter/shared";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createFetchHttpClient, ERROR_CODES, PorterError, silentLogger } from "@porter/shared";
+import type { HttpClient } from "@porter/shared";
 import { createSquareAdapter } from "@porter/adapter-square-appointments";
-import type { AdapterContext } from "@porter/core";
+import type { AdapterContext, CreateBookingRequest } from "@porter/core";
 
 const SANDBOX = "https://connect.squareupsandbox.com";
-const PRODUCTION = "https://connect.squareup.com";
 
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
-const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
-const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
-
-let passed = 0;
-let failed = 0;
-const notes: string[] = [];
-
-function ok(label: string, detail = ""): void {
-  passed++;
-  console.log(`  ${green("PASS")} ${label}${detail ? dim(`  ${detail}`) : ""}`);
-}
-function bad(label: string, detail = ""): void {
-  failed++;
-  console.log(`  ${red("FAIL")} ${label}${detail ? `  ${detail}` : ""}`);
-}
-function warn(label: string): void {
-  notes.push(label);
-  console.log(`  ${yellow("NOTE")} ${label}`);
-}
-function heading(title: string): void {
-  console.log(`\n${bold(title)}`);
+type CheckStatus = "pass" | "fail" | "skip" | "note";
+export interface SmokeCheck {
+  readonly status: CheckStatus;
+  readonly label: string;
+  readonly detail?: string;
 }
 
-async function main(): Promise<void> {
-  const token = process.env.PORTER_SQUARE_ACCESS_TOKEN;
-  if (!token) {
-    console.error(`
-${red("PORTER_SQUARE_ACCESS_TOKEN is not set.")}
+export interface SquareSmokeReport {
+  readonly runId: string;
+  readonly checks: readonly SmokeCheck[];
+  readonly outcome: "passed" | "failed" | "incomplete";
+  readonly unresolvedBookingRefs: readonly string[];
+  readonly uncertainCreate: boolean;
+}
 
-  1. Create a free Square developer account at https://developer.squareup.com
-  2. Make an application, open the Sandbox tab
-  3. Copy the sandbox Access Token (it starts with EAAA)
-  4. Put it in .env, which is gitignored:
+export interface SquareSmokeOptions {
+  readonly accessToken: string;
+  readonly baseUrl?: string;
+  /** Inject a fake transport for regression tests. */
+  readonly http?: HttpClient;
+  readonly operationTimeoutMs?: number;
+}
 
-       PORTER_SQUARE_ACCESS_TOKEN=EAAA...
-
-  5. Give the sandbox seller some Appointments services in the Square
-     dashboard: a bookable service with a price, a duration and a team member.
-`);
-    process.exit(1);
+/** Reject all other URLs before creating a client or using any credential. */
+export function validateSquareSandboxUrl(baseUrl = SANDBOX): void {
+  if (baseUrl !== SANDBOX && baseUrl !== `${SANDBOX}/`) {
+    throw new Error("Square smoke tests require https://connect.squareupsandbox.com; production and custom URLs are disabled.");
   }
+}
 
-  const useProduction = process.env.PORTER_SQUARE_BASE_URL === PRODUCTION;
-  if (useProduction && process.env.PORTER_SMOKE_ALLOW_PRODUCTION !== "true") {
-    console.error(red("\nRefusing to run against production Square. This creates real bookings for real customers."));
-    console.error("Set PORTER_SMOKE_ALLOW_PRODUCTION=true only if you genuinely mean it.\n");
-    process.exit(1);
-  }
-  const baseUrl = process.env.PORTER_SQUARE_BASE_URL ?? SANDBOX;
+/** No environment reads, console output, or process exits; safe to import in tests. */
+export async function runSquareSmoke(options: SquareSmokeOptions): Promise<SquareSmokeReport> {
+  validateSquareSandboxUrl(options.baseUrl);
+  if (!options.accessToken.trim()) throw new Error("PORTER_SQUARE_ACCESS_TOKEN is not set.");
+  const timeoutMs = options.operationTimeoutMs ?? 60_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("The operation timeout must be positive.");
 
-  console.log(bold("\nSquare sandbox smoke test"));
-  console.log(dim(`host: ${baseUrl}`));
-  console.log(dim(`token: ${token.slice(0, 6)}…${token.slice(-4)}`));
-
-  const adapter = createSquareAdapter({ http: createFetchHttpClient(), baseUrl });
-  const ctx: AdapterContext = {
-    actorId: "smoke",
-    log: process.env.PORTER_SMOKE_VERBOSE ? createLogger({ level: "debug" }) : silentLogger,
-    signal: AbortSignal.timeout(60_000),
-    credentials: { accessToken: token },
-    now: new Date(),
+  const runId = `porter-smoke-${randomUUID()}`;
+  const checks: SmokeCheck[] = [];
+  const bookings = new Map<string, string>();
+  let selectedProviderId: string | undefined;
+  let uncertainCreate = false;
+  let originalCreateBody: string | undefined;
+  let replayBodyChanged = false;
+  let stage = "Catalog discovery";
+  const check = (status: CheckStatus, label: string, detail?: string): void => {
+    checks.push({ status, label, ...(detail ? { detail } : {}) });
   };
+  const fail = (label: string, error: unknown): void => check("fail", label, safeError(error));
+  const transport = options.http ?? createFetchHttpClient({
+    maxRetries: 0,
+    // A redirect must never move this authenticated test off the sandbox host.
+    fetchImpl: (input, init) => fetch(input, { ...init, redirect: "error" }),
+  });
+  const adapter = createSquareAdapter({
+    baseUrl: SANDBOX,
+    http: {
+      async send(request) {
+        const creating = request.method === "POST" && request.url === `${SANDBOX}/v2/bookings`;
+        if (!creating) return transport.send(request);
+        // The adapter resolves customer IDs again during replay. Compare the
+        // actual wire body before sending, even when its input object is frozen.
+        const serializedBody = JSON.stringify(request.body);
+        if (originalCreateBody === undefined) originalCreateBody = serializedBody;
+        else if (serializedBody !== originalCreateBody) {
+          replayBodyChanged = true;
+          throw new PorterError("IDEMPOTENCY_CONFLICT", "The smoke replay payload changed.");
+        }
+        // Capture references before adapter mapping, including unexpected replay
+        // duplicates, so mapping failures still reach the cleanup in finally.
+        try {
+          const response = await transport.send(request);
+          const ref = createdBookingRef(response.body);
+          if (response.status >= 200 && response.status < 300 && ref && selectedProviderId) {
+            bookings.set(ref, selectedProviderId);
+          } else if (response.status < 400 || response.status >= 500 || response.status === 408) {
+            uncertainCreate = true;
+          }
+          return response;
+        } catch (error) {
+          uncertainCreate = true;
+          throw error;
+        }
+      },
+    },
+  });
 
-  // ------------------------------------------------------------ discovery
-  heading("1. Catalog and locations");
-  let providers;
-  try {
-    providers = await adapter.searchProviders({ categories: [], limit: 10 }, ctx);
-  } catch (error) {
-    bad("searchProviders", describe(error));
-    return summarise();
-  }
-
-  if (providers.length === 0) {
-    bad("searchProviders returned nothing", "the sandbox seller has no bookable Appointments services");
-    console.log(dim("\n  Add a service in the Square sandbox dashboard: Items → Services,"));
-    console.log(dim("  priced, with a duration, marked bookable, assigned to a team member.\n"));
-    return summarise();
-  }
-  ok("searchProviders", `${providers.length} location(s)`);
-
-  for (const p of providers) {
-    console.log(dim(`       ${p.provider.name} — ${p.services.length} service(s)`));
-    if (p.provider.unmappedCategories?.length) {
-      warn(`category inference missed: ${p.provider.unmappedCategories.slice(0, 4).join(", ")}`);
+  // Every adapter operation, including every cancellation, has a fresh deadline.
+  async function call<T>(operation: (ctx: AdapterContext) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await operation({
+        actorId: "square-sandbox-smoke",
+        log: silentLogger,
+        signal: controller.signal,
+        credentials: { accessToken: options.accessToken },
+        now: new Date(),
+      });
+    } finally {
+      clearTimeout(timer);
     }
   }
 
-  const bookable = providers.find((p) => p.services.some((s) => !s.quoteRequired));
-  if (!bookable) {
-    bad("no priced service", "every service came back quote-required, so pricing did not map");
-    return summarise();
+  function report(): SquareSmokeReport {
+    return {
+      runId,
+      checks,
+      outcome: checks.some((entry) => entry.status === "fail") ? "failed"
+        : checks.some((entry) => entry.status === "skip") ? "incomplete" : "passed",
+      unresolvedBookingRefs: [...bookings.keys()],
+      uncertainCreate,
+    };
   }
-  const provider = bookable.provider;
-  const service = bookable.services.find((s) => !s.quoteRequired)!;
-  ok("service mapping", `${service.name} · ${service.durationMinutes}min · ${service.price ? `$${(service.price.amount / 100).toFixed(2)}` : "no price"}`);
 
-  if (service.durationMinutes <= 0) bad("duration mapping", "Square returns milliseconds; expected minutes");
-  if (service.category === null) warn(`"${service.name}" did not map to a taxonomy category`);
-
-  // --------------------------------------------------------------- policy
-  heading("2. Cancellation policy, before any booking exists");
   try {
-    const policy = await adapter.getServiceCancellationPolicy!(
-      { providerId: provider.id, serviceId: service.id, startsAt: new Date(Date.now() + 7 * 86_400_000) },
-      ctx,
-    );
-    if (policy.known) {
-      ok("business booking profile", `fee ${policy.feeAmount ? `$${(policy.feeAmount.amount / 100).toFixed(2)}` : "none"}, free until ${policy.freeUntil?.toISOString() ?? "n/a"}`);
-    } else {
-      warn("the sandbox seller has not configured a cancellation policy, so it reports unknown (correct behaviour)");
+    const providers = await call((ctx) => adapter.searchProviders({ categories: [], limit: 10 }, ctx));
+    if (providers.length === 0) {
+      check("fail", "Catalog discovery", "No bookable services returned; configure sandbox Appointments services and staff.");
+      return report();
     }
-  } catch (error) {
-    bad("getServiceCancellationPolicy", describe(error));
-  }
+    check("pass", "Catalog discovery", `${providers.length} location(s) returned.`);
+    const selection = providers.flatMap(({ provider, services }) => services.map((service) => ({ provider, service })))
+      .find(({ service }) => !service.quoteRequired && service.price?.currency === "USD" && service.durationMinutes > 0);
+    if (!selection) {
+      check("fail", "Service mapping", "No fixed-price USD service with a positive duration returned.");
+      return report();
+    }
+    const { provider, service } = selection;
+    selectedProviderId = provider.id;
+    check("pass", "Service mapping", `${service.durationMinutes} minutes; ${service.price!.amount} USD minor units.`);
+    if (service.category === null) check("note", "Category mapping", "The selected service has no taxonomy category.");
 
-  // --------------------------------------------------------- availability
-  heading("3. Availability");
-  const from = new Date(Date.now() + 2 * 3_600_000);
-  const to = new Date(Date.now() + 14 * 86_400_000);
-  let slots;
-  try {
-    slots = await adapter.getAvailability({ providerId: provider.id, serviceId: service.id, from, to, limit: 5 }, ctx);
-  } catch (error) {
-    bad("getAvailability", describe(error));
-    return summarise();
-  }
+    const from = new Date(Date.now() + 2 * 3_600_000);
+    const to = new Date(Date.now() + 14 * 86_400_000);
+    stage = "Availability";
+    const slots = await call((ctx) => adapter.getAvailability({ providerId: provider.id, serviceId: service.id, from, to, limit: 5 }, ctx));
+    const slot = slots[0];
+    if (!slot) {
+      check("fail", "Availability", "No slots returned; check sandbox hours and staff bookability.");
+      return report();
+    }
+    if (!slot.providerSlotRef || !Number.isFinite(slot.startsAt.getTime()) || !Number.isFinite(slot.endsAt.getTime()) || slot.startsAt < from || slot.startsAt > to || slot.endsAt <= slot.startsAt) {
+      check("fail", "Availability", "The first slot has invalid times or no team member reference.");
+      return report();
+    }
+    check("pass", "Availability", `${slots.length} slot(s) returned.`);
 
-  if (slots.length === 0) {
-    bad("no availability", "check the sandbox seller's business hours and team member bookability");
-    return summarise();
-  }
-  ok("searchAvailability", `${slots.length} slot(s), first ${slots[0]!.startsAt.toISOString()}`);
+    stage = "Policy before booking";
+    const policy = await call((ctx) => adapter.getServiceCancellationPolicy!(
+      { providerId: provider.id, serviceId: service.id, startsAt: slot.startsAt }, ctx,
+    ));
+    check(policy.known ? "pass" : "note", "Policy before booking", policy.known ? "Published policy returned." : "Policy reported unknown.");
 
-  const slot = slots[0]!;
-  if (!slot.providerSlotRef) {
-    bad("team member missing", "providerSlotRef should carry the Square team member id");
-  } else {
-    ok("team member carried", slot.providerSlotRef);
-  }
-  if (slot.startsAt < from || slot.startsAt > to) bad("slot outside the requested window");
+    const slotQuery = { providerId: provider.id, serviceId: service.id, startsAt: slot.startsAt, providerSlotRef: slot.providerSlotRef };
+    stage = "Slot recheck";
+    const rechecked = await call((ctx) => adapter.checkSlot(slotQuery, ctx));
+    if (!rechecked) {
+      check("fail", "Slot recheck", "The offered slot is no longer available; no booking attempted.");
+      return report();
+    }
+    if (rechecked.endsAt.getTime() !== slot.endsAt.getTime() || rechecked.price?.amount !== slot.price?.amount || rechecked.price?.currency !== slot.price?.currency) {
+      check("fail", "Slot recheck", "The offered duration or price changed; no booking attempted.");
+      return report();
+    }
+    check("pass", "Slot recheck");
 
-  // ------------------------------------------------------------ checkSlot
-  heading("4. Re-check before booking");
-  try {
-    const rechecked = await adapter.checkSlot(
-      { providerId: provider.id, serviceId: service.id, startsAt: slot.startsAt, providerSlotRef: slot.providerSlotRef },
-      ctx,
-    );
-    rechecked ? ok("checkSlot confirms an open slot") : bad("checkSlot said a slot from getAvailability is gone");
-  } catch (error) {
-    bad("checkSlot", describe(error));
-  }
+    // Construct this once. The customer, notes, times, and key must remain
+    // identical across the original request and the idempotent replay.
+    const createRequest: CreateBookingRequest = Object.freeze({
+      providerId: provider.id,
+      locationId: slot.locationId,
+      serviceId: service.id,
+      startsAt: slot.startsAt,
+      endsAt: slot.endsAt,
+      providerSlotRef: slot.providerSlotRef,
+      customer: Object.freeze({ givenName: "Porter", phone: "+14155550101" }),
+      idempotencyKey: runId,
+      notes: `Porter sandbox smoke test ${runId}; synthetic customer; safe to delete.`,
+    });
+    stage = "Create booking";
+    const booking = await call((ctx) => adapter.createBooking(createRequest, ctx));
+    if (!bookings.has(booking.providerBookingRef)) {
+      throw new PorterError("ADAPTER_DOWN", "No usable booking reference returned.");
+    }
+    const validStatus = booking.status === "pending" || booking.status === "confirmed";
+    check(validStatus ? "pass" : "fail", "Create booking", validStatus ? `Returned ${booking.status}.` : "Unexpected booking status.");
+    const matchesRequest = booking.providerId === provider.id && booking.locationId === slot.locationId
+      && booking.serviceId === service.id && booking.startsAt.getTime() === slot.startsAt.getTime()
+      && booking.endsAt.getTime() === slot.endsAt.getTime();
+    check(matchesRequest ? "pass" : "fail", "Created booking details",
+      matchesRequest ? "Provider, location, service, and times match the request." : "Returned booking differs from the requested appointment.");
 
-  // -------------------------------------------------------------- booking
-  heading("5. Create a booking");
-  const idempotencyKey = `porter-smoke-${Date.now()}`;
-  let booking;
-  try {
-    booking = await adapter.createBooking(
-      {
-        providerId: provider.id,
-        locationId: slot.locationId,
-        serviceId: service.id,
-        startsAt: slot.startsAt,
-        endsAt: slot.endsAt,
-        providerSlotRef: slot.providerSlotRef,
-        customer: { givenName: "Porter", email: `porter-smoke-${Date.now()}@example.com` },
-        idempotencyKey,
-        notes: "Porter smoke test — safe to delete",
-      },
-      ctx,
-    );
-    ok("createBooking", `${booking.providerBookingRef} · ${booking.status}`);
-  } catch (error) {
-    bad("createBooking", describe(error));
-    return summarise();
-  }
+    try {
+      const replay = await call((ctx) => adapter.createBooking(createRequest, ctx));
+      check(replay.providerBookingRef === booking.providerBookingRef ? "pass" : "fail", "Idempotent replay",
+        replay.providerBookingRef === booking.providerBookingRef ? "Identical request returned the same booking." : "Replay returned a second booking; both will be cancelled.");
+    } catch (error) {
+      if (replayBodyChanged) check("fail", "Idempotent replay", "The rebuilt Square booking payload changed; replay was not sent.");
+      else fail("Idempotent replay", error);
+    }
 
-  if (!["pending", "confirmed"].includes(booking.status)) {
-    bad("status mapping", `got "${booking.status}"`);
-  }
+    try {
+      const available = await call((ctx) => adapter.checkSlot(slotQuery, ctx));
+      check(available === null ? "pass" : "note", "Availability after booking",
+        available === null ? "The slot is no longer offered." : "The slot is still offered; exclusive occupancy was not established.");
+      const bookingPolicy = await call((ctx) => adapter.getCancellationPolicy(booking.providerBookingRef, ctx));
+      check("pass", "Retrieve booking policy", bookingPolicy.known ? "Published policy returned." : "Policy reported unknown.");
+    } catch (error) {
+      fail("Booking readback", error);
+    }
 
-  heading("6. Square's own idempotency");
-  try {
-    const replay = await adapter.createBooking(
-      {
-        providerId: provider.id,
-        locationId: slot.locationId,
-        serviceId: service.id,
-        startsAt: slot.startsAt,
-        endsAt: slot.endsAt,
-        providerSlotRef: slot.providerSlotRef,
-        customer: { givenName: "Porter", email: `porter-smoke-${Date.now()}@example.com` },
-        idempotencyKey,
-      },
-      ctx,
-    );
-    replay.providerBookingRef === booking.providerBookingRef
-      ? ok("same key replayed the same booking")
-      : bad("same key created a second booking", `${booking.providerBookingRef} vs ${replay.providerBookingRef}`);
-  } catch (error) {
-    bad("idempotent replay", describe(error));
-  }
-
-  heading("7. The slot is no longer bookable");
-  try {
-    const gone = await adapter.checkSlot(
-      { providerId: provider.id, serviceId: service.id, startsAt: slot.startsAt, providerSlotRef: slot.providerSlotRef },
-      ctx,
-    );
-    gone === null
-      ? ok("checkSlot now returns null")
-      : warn("the slot is still offered after booking — Square may allow overlapping bookings for this seller");
-  } catch (error) {
-    bad("checkSlot after booking", describe(error));
-  }
-
-  heading("8. Policy for the real booking");
-  try {
-    const policy = await adapter.getCancellationPolicy(booking.providerBookingRef, ctx);
-    ok("getCancellationPolicy", policy.known ? "published" : "not published (reported as unknown)");
-  } catch (error) {
-    bad("getCancellationPolicy", describe(error));
-  }
-
-  // ----------------------------------------------------------- reschedule
-  heading("9. Reschedule");
-  try {
-    const later = await adapter.getAvailability(
-      { providerId: provider.id, serviceId: service.id, from: new Date(slot.endsAt.getTime() + 3_600_000), to, limit: 3 },
-      ctx,
-    );
-    if (later.length === 0) {
-      warn("no later slot available to reschedule into; skipped");
-    } else {
-      const moved = await adapter.rescheduleBooking(
-        {
+    try {
+      const later = await call((ctx) => adapter.getAvailability({
+        providerId: provider.id, serviceId: service.id, from: new Date(slot.endsAt.getTime() + 3_600_000), to, limit: 3,
+      }, ctx));
+      const destination = later[0];
+      if (!destination) {
+        check("skip", "Reschedule", "No later slot returned.");
+      } else {
+        const moved = await call((ctx) => adapter.rescheduleBooking({
           bookingRef: booking.providerBookingRef,
           providerId: provider.id,
           serviceId: service.id,
-          startsAt: later[0]!.startsAt,
-          endsAt: later[0]!.endsAt,
-          providerSlotRef: later[0]!.providerSlotRef,
-          idempotencyKey: `${idempotencyKey}-move`,
-        },
-        ctx,
-      );
-      moved.startsAt.getTime() === later[0]!.startsAt.getTime()
-        ? ok("rescheduleBooking", moved.startsAt.toISOString())
-        : bad("reschedule did not move the booking");
+          startsAt: destination.startsAt,
+          endsAt: destination.endsAt,
+          providerSlotRef: destination.providerSlotRef,
+          idempotencyKey: `${runId}-move`,
+        }, ctx));
+        check(moved.providerBookingRef === booking.providerBookingRef && moved.startsAt.getTime() === destination.startsAt.getTime()
+          && moved.endsAt.getTime() === destination.endsAt.getTime() ? "pass" : "fail", "Reschedule");
+      }
+    } catch (error) {
+      fail("Reschedule", error);
+    }
+
+    try {
+      await call((ctx) => adapter.cancelBooking({ bookingRef: "not-a-real-booking-ref", providerId: provider.id, idempotencyKey: `${runId}-missing` }, ctx));
+      check("fail", "Missing booking error mapping", "Expected NOT_FOUND; received success.");
+    } catch (error) {
+      if (PorterError.is(error) && error.code === "NOT_FOUND") check("pass", "Missing booking error mapping");
+      else fail("Missing booking error mapping", error);
     }
   } catch (error) {
-    bad("rescheduleBooking", describe(error));
+    fail(stage, error);
+  } finally {
+    let cancelIndex = 0;
+    for (const [bookingRef, providerId] of bookings) {
+      try {
+        const cancelled = await call((ctx) => adapter.cancelBooking({
+          bookingRef, providerId, reason: "Porter sandbox smoke test", idempotencyKey: `${runId}-cancel-${++cancelIndex}`,
+        }, ctx));
+        if (cancelled.status === "cancelled" && cancelled.providerBookingRef === bookingRef) {
+          bookings.delete(bookingRef);
+          check("pass", "Cancel test booking");
+        } else {
+          check("fail", "Cancel test booking", "Cancellation was not confirmed; inspect the sandbox dashboard.");
+        }
+      } catch (error) {
+        fail("Cancel test booking", error);
+      }
+    }
+    if (uncertainCreate) check("fail", "Uncertain create outcome", "A booking write had no definitive response. Inspect sandbox appointments using this run ID before another run.");
   }
+  return report();
+}
 
-  // --------------------------------------------------------------- clean up
-  heading("10. Cancel (cleaning up after ourselves)");
+function createdBookingRef(body: unknown): string | undefined {
+  if (!body || typeof body !== "object" || !("booking" in body)) return undefined;
+  const booking = body.booking;
+  if (!booking || typeof booking !== "object" || !("id" in booking)) return undefined;
+  return typeof booking.id === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(booking.id) ? booking.id : undefined;
+}
+
+function safeError(error: unknown): string {
+  // Messages, details, causes, URLs and provider response bodies may contain
+  // credentials or customer data. Only emit Porter's closed error taxonomy.
+  return PorterError.is(error) && ERROR_CODES.includes(error.code) ? error.code : "Unexpected failure (details withheld).";
+}
+
+async function main(): Promise<void> {
+  // Configuration errors are fixed strings; never echo the supplied URL/token.
   try {
-    const cancelled = await adapter.cancelBooking(
-      { bookingRef: booking.providerBookingRef, providerId: provider.id, reason: "Porter smoke test", idempotencyKey: `${idempotencyKey}-cancel` },
-      ctx,
-    );
-    cancelled.status === "cancelled" ? ok("cancelBooking") : bad("cancel status", cancelled.status);
-  } catch (error) {
-    bad("cancelBooking", describe(error), );
-    console.log(red(`\n  Booking ${booking.providerBookingRef} was left open. Cancel it in the Square dashboard.`));
+    validateSquareSandboxUrl(process.env.PORTER_SQUARE_BASE_URL);
+    if (!process.env.PORTER_SQUARE_ACCESS_TOKEN?.trim()) {
+      console.error("PORTER_SQUARE_ACCESS_TOKEN is not set. Configure a sandbox token in the ignored .env file.");
+      process.exitCode = 1;
+      return;
+    }
+  } catch {
+    console.error("Refusing smoke test: only https://connect.squareupsandbox.com is allowed. Production overrides are disabled.");
+    process.exitCode = 1;
+    return;
   }
-
-  heading("11. Error mapping");
-  try {
-    await adapter.cancelBooking({ bookingRef: "not-a-real-booking-ref", providerId: provider.id, idempotencyKey: "x" }, ctx);
-    bad("unknown booking ref", "expected NOT_FOUND, got success");
-  } catch (error) {
-    PorterError.is(error) && error.code === "NOT_FOUND"
-      ? ok("unknown ref maps to NOT_FOUND")
-      : bad("unknown ref mapping", describe(error));
-  }
-
-  summarise();
+  console.log(`Square sandbox smoke test (${SANDBOX})`);
+  const report = await runSquareSmoke({ accessToken: process.env.PORTER_SQUARE_ACCESS_TOKEN! });
+  console.log(`Run: ${report.runId}`);
+  for (const entry of report.checks) console.log(`${entry.status.toUpperCase()} ${entry.label}${entry.detail ? `: ${entry.detail}` : ""}`);
+  console.log(`Result: ${report.outcome}; ${report.checks.filter((entry) => entry.status === "pass").length} checks passed.`);
+  if (report.unresolvedBookingRefs.length) console.error(`Cancel these test bookings in the sandbox dashboard: ${report.unresolvedBookingRefs.join(", ")}`);
+  console.log("Evidence covers only the reported sandbox checks. Buyer OAuth scopes, notification delivery, Muse, and production readiness remain unverified. Synthetic customer records are retained.");
+  process.exitCode = report.outcome === "passed" ? 0 : 1;
 }
 
-function describe(error: unknown): string {
-  if (PorterError.is(error)) return `${error.code}: ${error.message}`;
-  return String(error);
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((error) => {
+    console.error(`Smoke test stopped: ${safeError(error)}`);
+    process.exitCode = 1;
+  });
 }
-
-function summarise(): void {
-  console.log(`\n${bold("Result")}  ${green(`${passed} passed`)}${failed ? `  ${red(`${failed} failed`)}` : ""}${notes.length ? `  ${yellow(`${notes.length} note(s)`)}` : ""}`);
-  if (failed === 0) {
-    console.log(green("\nThe Square adapter works against the real API. The fixtures held.\n"));
-  } else {
-    console.log(red("\nSomething the fixtures assumed is not true of the real API. Fix the adapter, then re-record the fixtures.\n"));
-  }
-  process.exit(failed === 0 ? 0 : 1);
-}
-
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
