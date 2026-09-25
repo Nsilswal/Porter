@@ -32,6 +32,8 @@ Store provider access/refresh tokens encrypted and record the requested scopes a
 
 The adapter receives an access token; it does not implement OAuth, refresh or revocation. Its caches are partitioned by a non-reversible token digest. This prevents reuse of cached catalog/profile data across different credentials, but does not replace merchant ownership checks, unique provider identities, or durable merchant connections.
 
+`SquareOAuthClient` now implements the provider side of authorization: the consent URL, code exchange, token-status verification, refresh and full-grant revocation. It verifies the application, merchant, expiry and exact scope set, uses fixed Square environment origins, and does not follow redirects or retry authorization writes. Errors contain only Porter's closed messages. This module is covered by transport-level tests; the browser callback, session/state binding, encrypted connection store and owner journey must be integrated separately before it can be used for onboarding.
+
 ## Activation and booking eligibility
 
 The selected merchant/location must satisfy the PRD's US, USD, single-location, ordinary salon/spa scope. Import review must establish each enabled offering's exact service variation, bookable staff, duration and price. An unavailable slot is an ordinary business result; an unavailable booking connection blocks activation.
