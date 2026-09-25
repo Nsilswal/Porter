@@ -323,3 +323,72 @@ export const importDrafts = pgTable("import_drafts", {
   owner: foreignKey({ columns: [t.claimedOwnerId, t.claimedBusinessId], foreignColumns: [pilotBusinesses.ownerId, pilotBusinesses.id] }).onDelete("cascade"),
   byExpiry: index("import_drafts_expiry_idx").on(t.expiresAt),
 }));
+
+export const customerOAuthClients = pgTable("customer_oauth_clients", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Authorization survives email sign-in, but only the initiating browser may give consent. */
+export const customerOAuthRequests = pgTable("customer_oauth_requests", {
+  requestHash: text("request_hash").primaryKey(),
+  browserNonceHash: text("browser_nonce_hash").notNull(),
+  clientId: text("client_id").notNull().references(() => customerOAuthClients.id, { onDelete: "cascade" }),
+  redirectUri: text("redirect_uri").notNull(),
+  resource: text("resource").notNull(),
+  scopes: jsonb("scopes").$type<string[]>().notNull(),
+  codeChallenge: text("code_challenge").notNull(),
+  state: text("state"),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ byExpiry: index("customer_oauth_requests_expiry_idx").on(t.expiresAt) }));
+
+/** A fixed-duration refresh family. Revocation invalidates every access and refresh token. */
+export const customerOAuthGrants = pgTable("customer_oauth_grants", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  clientId: text("client_id").notNull().references(() => customerOAuthClients.id, { onDelete: "cascade" }),
+  resource: text("resource").notNull(),
+  scopes: jsonb("scopes").$type<string[]>().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ byUser: index("customer_oauth_grants_user_idx").on(t.userId), byExpiry: index("customer_oauth_grants_expiry_idx").on(t.expiresAt) }));
+
+export const customerOAuthCodes = pgTable("customer_oauth_codes", {
+  codeHash: text("code_hash").primaryKey(),
+  requestHash: text("request_hash").notNull().references(() => customerOAuthRequests.requestHash, { onDelete: "cascade" }),
+  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  sessionHash: text("session_hash").notNull(),
+  clientId: text("client_id").notNull().references(() => customerOAuthClients.id, { onDelete: "cascade" }),
+  redirectUri: text("redirect_uri").notNull(),
+  resource: text("resource").notNull(),
+  scopes: jsonb("scopes").$type<string[]>().notNull(),
+  codeChallenge: text("code_challenge").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  grantId: text("grant_id").references(() => customerOAuthGrants.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  session: foreignKey({ columns: [t.userId, t.sessionHash], foreignColumns: [pilotSessions.userId, pilotSessions.sessionHash] }).onDelete("cascade"),
+  byRequest: uniqueIndex("customer_oauth_codes_request_idx").on(t.requestHash),
+  byExpiry: index("customer_oauth_codes_expiry_idx").on(t.expiresAt),
+}));
+
+export const customerOAuthAccessTokens = pgTable("customer_oauth_access_tokens", {
+  tokenHash: text("token_hash").primaryKey(),
+  grantId: text("grant_id").notNull().references(() => customerOAuthGrants.id, { onDelete: "cascade" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ byGrant: index("customer_oauth_access_grant_idx").on(t.grantId), byExpiry: index("customer_oauth_access_expiry_idx").on(t.expiresAt) }));
+
+/** Spent hashes stay for the lifetime of the family so reuse is detected across every rotation. */
+export const customerOAuthRefreshTokens = pgTable("customer_oauth_refresh_tokens", {
+  tokenHash: text("token_hash").primaryKey(),
+  grantId: text("grant_id").notNull().references(() => customerOAuthGrants.id, { onDelete: "cascade" }),
+  consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({ byGrant: index("customer_oauth_refresh_grant_idx").on(t.grantId) }));
