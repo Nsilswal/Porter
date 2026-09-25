@@ -17,7 +17,7 @@ function build(options: ConstructorParameters<typeof FakeSquare>[0] = {}) {
 runAdapterConformance("square-appointments", {
   makeAdapter: () => build().adapter,
   searchCategory: "beauty.haircut",
-  customer: { givenName: "Sam", email: "sam@example.com" },
+  customer: { givenName: "Sam", email: "sam@example.com", phone: "+14155550100" },
   credentials: { accessToken: SQUARE_TEST_TOKEN },
   makeFailingAdapter: () => build({ failWith: { status: 503, code: "SERVICE_UNAVAILABLE" } }).adapter,
 });
@@ -90,7 +90,7 @@ describe("square adapter — booking", () => {
         startsAt: slot.startsAt,
         endsAt: slot.endsAt,
         providerSlotRef: slot.providerSlotRef,
-        customer: { givenName: "Sam", email: "sam@example.com" },
+        customer: { givenName: "Sam", email: "sam@example.com", phone: "+14155550100" },
         idempotencyKey: "sq-test-1",
       },
       c,
@@ -128,7 +128,7 @@ describe("square adapter — booking", () => {
         startsAt: first.slot.startsAt,
         endsAt: first.slot.endsAt,
         providerSlotRef: first.slot.providerSlotRef,
-        customer: { givenName: "Sam", email: "sam@example.com" },
+        customer: { givenName: "Sam", email: "sam@example.com", phone: "+14155550100" },
         idempotencyKey: "sq-test-1",
       },
       ctx(),
@@ -148,7 +148,7 @@ describe("square adapter — booking", () => {
     // A full week, so the window cannot land entirely on a closed day.
     const slots = await adapter.getAvailability({ providerId: result!.provider.id, serviceId: service.id, from, to: new Date(from.getTime() + 7 * 86_400_000), limit: 5 }, c);
     await adapter.createBooking(
-      { providerId: result!.provider.id, locationId: slots[0]!.locationId, serviceId: service.id, startsAt: slots[0]!.startsAt, endsAt: slots[0]!.endsAt, providerSlotRef: slots[0]!.providerSlotRef, customer: { givenName: "Sam", email: "sam@example.com" }, idempotencyKey: "sq-test-2" },
+      { providerId: result!.provider.id, locationId: slots[0]!.locationId, serviceId: service.id, startsAt: slots[0]!.startsAt, endsAt: slots[0]!.endsAt, providerSlotRef: slots[0]!.providerSlotRef, customer: { givenName: "Sam", email: "sam@example.com", phone: "+14155550100" }, idempotencyKey: "sq-test-2" },
       c,
     );
     expect(fake.customers.size).toBe(before);
@@ -160,7 +160,7 @@ describe("square adapter — booking", () => {
     const created = fake.requests.find((r) => r.method === "POST" && r.path === "/v2/customers");
     const body = created!.body as Record<string, unknown>;
     // Core projects before calling; nothing beyond the declared set arrives.
-    expect(Object.keys(body).sort()).toEqual(["email_address", "given_name"]);
+    expect(Object.keys(body).sort()).toEqual(["email_address", "given_name", "idempotency_key", "phone_number"]);
     expect(body).not.toHaveProperty("address_line_1");
   });
 
@@ -191,7 +191,7 @@ describe("square adapter — booking", () => {
     const slots = await adapter.getAvailability({ providerId: provider.id, serviceId: service.id, from, to: new Date(from.getTime() + 7 * 86_400_000), limit: 3 }, c);
     const target = slots.find((s) => s.providerSlotRef === slot.providerSlotRef)!;
     await adapter.createBooking(
-      { providerId: provider.id, locationId: target.locationId, serviceId: service.id, startsAt: target.startsAt, endsAt: target.endsAt, providerSlotRef: target.providerSlotRef, customer: { givenName: "Kim", email: "kim@example.com" }, idempotencyKey: "sq-other" },
+      { providerId: provider.id, locationId: target.locationId, serviceId: service.id, startsAt: target.startsAt, endsAt: target.endsAt, providerSlotRef: target.providerSlotRef, customer: { givenName: "Kim", email: "kim@example.com", phone: "+14155550101" }, idempotencyKey: "sq-other" },
       c,
     );
     expect(fake.bookings.size).toBe(2);
@@ -214,13 +214,13 @@ describe("square adapter — cancellation policy", () => {
     const from = new Date(c.now.getTime() + 2 * 60 * 60_000);
     const slots = await adapter.getAvailability({ providerId: result!.provider.id, serviceId: service.id, from, to: new Date(from.getTime() + 7 * 86_400_000), limit: 3 }, c);
     const booking = await adapter.createBooking(
-      { providerId: result!.provider.id, locationId: slots[0]!.locationId, serviceId: service.id, startsAt: slots[0]!.startsAt, endsAt: slots[0]!.endsAt, providerSlotRef: slots[0]!.providerSlotRef, customer: { givenName: "Sam", email: "sam@example.com" }, idempotencyKey: "sq-pol" },
+      { providerId: result!.provider.id, locationId: slots[0]!.locationId, serviceId: service.id, startsAt: slots[0]!.startsAt, endsAt: slots[0]!.endsAt, providerSlotRef: slots[0]!.providerSlotRef, customer: { givenName: "Sam", email: "sam@example.com", phone: "+14155550100" }, idempotencyKey: "sq-pol" },
       c,
     );
 
     const policy = await adapter.getCancellationPolicy(booking.providerBookingRef, c);
     expect(policy.known).toBe(true);
-    expect(policy.feeAmount?.amount).toBe(2500);
+    expect(policy.feeAmount).toBeNull();
     // 86400 seconds before the start.
     expect(policy.freeUntil!.getTime()).toBe(booking.startsAt.getTime() - 86_400_000);
   });

@@ -16,6 +16,8 @@
             "type": "ITEM_VARIATION",
             "id": "VAR_CUT_45",
             "version": 1700000000001,
+            "present_at_all_locations": false,
+            "present_at_location_ids": ["L7GK3M2QWERTY"],
             "item_variation_data": {
               "item_id": "ITEM_CUT",
               "name": "45 minutes",
@@ -23,8 +25,7 @@
               "price_money": { "amount": 6500, "currency": "USD" },
               "service_duration": 2700000,
               "available_for_booking": true,
-              "team_member_ids": ["TM_ALEX", "TM_JO"],
-              "location_ids": ["L7GK3M2QWERTY"]
+              "team_member_ids": ["TM_ALEX", "TM_JO"]
             }
           }
         ]
@@ -44,14 +45,15 @@
             "type": "ITEM_VARIATION",
             "id": "VAR_BALAYAGE",
             "version": 1700000000002,
+            "present_at_all_locations": false,
+            "present_at_location_ids": ["L7GK3M2QWERTY"],
             "item_variation_data": {
               "item_id": "ITEM_COLOR",
               "name": "Consultation required",
               "pricing_type": "VARIABLE_PRICING",
               "service_duration": 10800000,
               "available_for_booking": true,
-              "team_member_ids": ["TM_JO"],
-              "location_ids": ["L7GK3M2QWERTY"]
+              "team_member_ids": ["TM_JO"]
             }
           }
         ]
@@ -71,6 +73,8 @@
             "type": "ITEM_VARIATION",
             "id": "VAR_WORKS",
             "version": 1700000000003,
+            "present_at_all_locations": false,
+            "present_at_location_ids": ["L7GK3M2QWERTY"],
             "item_variation_data": {
               "item_id": "ITEM_UNMAPPABLE",
               "name": "Standard",
@@ -78,8 +82,7 @@
               "price_money": { "amount": 18000, "currency": "USD" },
               "service_duration": 5400000,
               "available_for_booking": true,
-              "team_member_ids": ["TM_ALEX"],
-              "location_ids": ["L7GK3M2QWERTY"]
+              "team_member_ids": ["TM_ALEX"]
             }
           }
         ]
@@ -115,6 +118,8 @@
             "type": "ITEM_VARIATION",
             "id": "VAR_FADE_30",
             "version": 1700000000004,
+            "present_at_all_locations": false,
+            "present_at_location_ids": ["LQ9XBARBER01"],
             "item_variation_data": {
               "item_id": "ITEM_FADE",
               "name": "30 minutes",
@@ -122,8 +127,7 @@
               "price_money": { "amount": 4500, "currency": "USD" },
               "service_duration": 1800000,
               "available_for_booking": true,
-              "team_member_ids": ["TM_RAY"],
-              "location_ids": ["LQ9XBARBER01"]
+              "team_member_ids": ["TM_RAY"]
             }
           }
         ]

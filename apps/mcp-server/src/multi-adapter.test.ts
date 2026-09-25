@@ -75,7 +75,7 @@ describe("multi-adapter routing", () => {
       givenName: "Sam",
       familyName: "Rivera",
       email: "sam@example.com",
-      phone: "555-0100",
+      phone: "+14155550100",
     });
     // Square confirms immediately.
     expect(square.booking.status).toBe("confirmed");
@@ -103,7 +103,7 @@ describe("multi-adapter routing", () => {
       givenName: "Sam",
       familyName: "Rivera",
       email: "sam@example.com",
-      phone: "555-0100",
+      phone: "+14155550100",
       addressLine1: "12 Oak St",
       city: "Oakland",
       region: "CA",
@@ -114,9 +114,9 @@ describe("multi-adapter routing", () => {
     await bookThrough(h, "haircut", "square", customer);
     await bookThrough(h, "drain", "jobber", customer);
 
-    // Square takes a name and an email. It never sees the address.
+    // Square requires name and phone; email is optional. Address stays local.
     const squareCustomer = h.squareHttp.requests.find((r) => r.method === "POST" && r.path === "/v2/customers");
-    expect(Object.keys(squareCustomer!.body as object).sort()).toEqual(["email_address", "family_name", "given_name", "phone_number"]);
+    expect(Object.keys(squareCustomer!.body as object).sort()).toEqual(["email_address", "family_name", "given_name", "idempotency_key", "phone_number"]);
 
     // Jobber needs the address, because someone drives to it.
     const jobberProperty = h.jobberHttp.operations.find((o) => o.name === "PorterPropertyCreate");
@@ -131,10 +131,10 @@ describe("multi-adapter routing", () => {
   it("shows a real Square policy and an unknown Jobber one", async () => {
     const h = harness();
 
-    const square = await bookThrough(h, "haircut", "square", { givenName: "Sam", email: "sam@example.com", phone: "555-0100" });
+    const square = await bookThrough(h, "haircut", "square", { givenName: "Sam", email: "sam@example.com", phone: "+14155550100" });
     const squareCancel = (await h.engine.cancelBooking(h.actor, { booking_id: square.booking.booking_id, idempotency_key: "c-sq" }, h.signal)) as ConfirmationEnvelope;
     expect(squareCancel.cancellationPolicy.known).toBe(true);
-    expect(squareCancel.cancellationPolicy.feeAmount).toBe(2500);
+    expect(squareCancel.cancellationPolicy.feeAmount).toBeNull();
 
     const jobber = await bookThrough(h, "drain", "jobber", {
       givenName: "Sam",

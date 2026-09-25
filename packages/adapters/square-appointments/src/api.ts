@@ -18,10 +18,10 @@
  *
  * Scopes: APPOINTMENTS_READ / APPOINTMENTS_WRITE at buyer level, plus
  * APPOINTMENTS_ALL_READ / APPOINTMENTS_ALL_WRITE for seller-level calls.
- * Also ITEMS_READ for the catalog, MERCHANT_PROFILE_READ for locations, and
- * CUSTOMERS_READ / CUSTOMERS_WRITE to attach a customer to a booking.
- * Porter requests read scopes by default and write scopes only for the
- * operations that need them.
+ * Also APPOINTMENTS_BUSINESS_SETTINGS_READ for booking profiles, ITEMS_READ
+ * for the catalog, MERCHANT_PROFILE_READ for locations, and CUSTOMERS_READ /
+ * CUSTOMERS_WRITE to attach a customer. See docs/square-integration-contract.md
+ * for the pilot's buyer-level OAuth contract; token issuance is outside this adapter.
  */
 
 export interface SquareMoney {
@@ -59,10 +59,14 @@ export interface SquareCatalogObject {
   readonly id: string;
   readonly version?: number;
   readonly is_deleted?: boolean;
+  readonly present_at_all_locations?: boolean;
+  readonly present_at_location_ids?: readonly string[];
+  readonly absent_at_location_ids?: readonly string[];
   readonly item_data?: {
     readonly name?: string;
     readonly description?: string;
     readonly product_type?: string; // "APPOINTMENTS_SERVICE"
+    readonly is_archived?: boolean;
     readonly categories?: readonly { readonly id?: string }[];
     readonly variations?: readonly SquareCatalogObject[];
   };
@@ -74,7 +78,11 @@ export interface SquareCatalogObject {
     readonly service_duration?: number; // milliseconds
     readonly available_for_booking?: boolean;
     readonly team_member_ids?: readonly string[];
-    readonly location_ids?: readonly string[];
+    readonly location_overrides?: readonly {
+      readonly location_id: string;
+      readonly price_money?: SquareMoney;
+      readonly pricing_type?: "FIXED_PRICING" | "VARIABLE_PRICING";
+    }[];
   };
   readonly category_data?: { readonly name?: string };
 }
@@ -121,6 +129,7 @@ export interface SquareBusinessBookingProfile {
   readonly seller_id?: string;
   readonly booking_enabled?: boolean;
   readonly booking_policy?: string;
+  readonly support_seller_level_writes?: boolean;
   readonly allow_user_cancel?: boolean;
   readonly business_appointment_settings?: {
     readonly cancellation_window_seconds?: number;
@@ -156,6 +165,7 @@ export interface ListLocationsResponse extends SquareEnvelope {
 }
 export interface SearchCatalogResponse extends SquareEnvelope {
   readonly objects?: readonly SquareCatalogObject[];
+  readonly related_objects?: readonly SquareCatalogObject[];
   readonly cursor?: string;
 }
 export interface SearchAvailabilityResponse extends SquareEnvelope {
