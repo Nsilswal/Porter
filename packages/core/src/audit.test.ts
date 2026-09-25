@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { assertNoPersonalData } from "./audit.js";
+import { describe, expect, it, vi } from "vitest";
+import { FixedClock, silentLogger } from "@porter/shared";
+import { AuditLog, assertNoPersonalData } from "./audit.js";
 import { TEST_CUSTOMER, createHarness, firstBookableSlot } from "./testing.js";
 import type { ConfirmationEnvelope } from "./confirmation.js";
 import type { AuditRecord } from "./ports.js";
@@ -35,6 +36,22 @@ describe("audit log", () => {
 
   it("rejects a payload smuggled in where the hash belongs", () => {
     expect(() => assertNoPersonalData({ ...base, argsHash: JSON.stringify({ email: "a@b.com" }) })).toThrow(/sha256/);
+  });
+
+  it("reports database failures without logging SQL parameters or nested causes", async () => {
+    const error = vi.fn();
+    const failure = new Error("SQL parameters: sam@example.com, private-token", { cause: new Error("Private database connection string") });
+    const audit = new AuditLog(
+      { append: async () => { throw failure; }, list: async () => [] },
+      new FixedClock(base.at),
+      { ...silentLogger, error },
+    );
+    await audit.record({ actorId: "user_abc", tool: "create_booking", action: "commit", args: {}, outcome: "ok", startedAtMs: base.at.getTime() });
+    expect(error).toHaveBeenCalledWith("audit_append_failed", { tool: "create_booking", outcome: "ok", code: "unknown" });
+    const output = JSON.stringify(error.mock.calls);
+    expect(output).not.toContain("sam@example.com");
+    expect(output).not.toContain("private-token");
+    expect(output).not.toContain("connection string");
   });
 });
 

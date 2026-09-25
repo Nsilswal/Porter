@@ -82,18 +82,22 @@ export interface BuildEnvelopeInput {
 /**
  * Canonical hash of the terms being confirmed.
  *
- * Derived from the machine-readable values only, never from prose, so a
- * reworded policy string does not invalidate a confirmation while a changed
- * price always does.
+ * Includes every disclosed policy field. Provider prose can carry conditions
+ * that have no structured equivalent, so a changed policy needs new consent.
  */
 export function termsHash(input: {
   action: string;
   providerId: string;
   serviceId: string;
+  locationId: string;
   startsAtMs: number;
+  endsAtMs: number;
+  providerSlotRef: string | null;
+  moneyKind: ConfirmationMoney["kind"];
   amountMinor: number | null;
   currency: string | null;
-  feeMinor: number | null;
+  cancellationPolicy: CancellationPolicy;
+  breakdown: readonly LineItem[];
   nonRefundable: boolean;
   recurrence: Recurrence;
 }): string {

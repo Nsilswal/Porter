@@ -42,7 +42,24 @@ export interface BookingStore {
   deleteAllForUser(userId: string): Promise<number>;
 }
 
-export type IdempotencyState = "in_flight" | "completed";
+/** Serialize changes to a booking across processes and different request ids. */
+export interface BookingMutationStore {
+  /** Verify ownership and acquire durably. Existing guards never expire automatically. */
+  acquire(userId: string, bookingId: string, tool: string, key: string): Promise<boolean>;
+  /** Release only if this exact request owns the guard. */
+  release(userId: string, bookingId: string, tool: string, key: string): Promise<void>;
+}
+
+export type IdempotencyState = "in_flight" | "uncertain" | "completed";
+
+/** Non-personal references needed to investigate an unacknowledged write. */
+export interface IdempotencyOperation {
+  readonly adapterId: string;
+  readonly providerId: string;
+  readonly providerOperation: string;
+  readonly idempotencyKey: string;
+  readonly providerBookingRef?: string;
+}
 
 export interface IdempotencyRecord {
   readonly userId: string;
@@ -51,6 +68,7 @@ export interface IdempotencyRecord {
   /** Hash of the request payload. The payload itself is never stored. */
   readonly argsHash: string;
   readonly state: IdempotencyState;
+  readonly operation: IdempotencyOperation | null;
   /** Encrypted response envelope. Null while in flight. */
   readonly responseCipher: string | null;
   readonly createdAt: Date;
@@ -62,8 +80,11 @@ export interface IdempotencyStore {
    * Reserve a key atomically. Returns the existing record when one is present,
    * so the caller can replay, conflict, or wait.
    */
-  reserve(record: Omit<IdempotencyRecord, "responseCipher" | "state"> & { state: "in_flight" }): Promise<IdempotencyRecord | null>;
+  reserve(record: Omit<IdempotencyRecord, "responseCipher" | "state" | "operation"> & { state: "in_flight" }): Promise<IdempotencyRecord | null>;
+  /** Persist before sending an external write. Never reclaim this state on expiry. */
+  markUncertain(userId: string, tool: string, key: string, operation: IdempotencyOperation): Promise<void>;
   complete(userId: string, tool: string, key: string, responseCipher: string): Promise<void>;
+  /** Release only reservations that have not reached the external-write boundary. */
   release(userId: string, tool: string, key: string): Promise<void>;
   get(userId: string, tool: string, key: string): Promise<IdempotencyRecord | null>;
   deleteAllForUser(userId: string): Promise<number>;
@@ -113,6 +134,7 @@ export interface AuditStore {
 
 export interface Store {
   readonly bookings: BookingStore;
+  readonly bookingMutations: BookingMutationStore;
   readonly idempotency: IdempotencyStore;
   readonly confirmations: ConfirmationStore;
   readonly keys: KeyStore;

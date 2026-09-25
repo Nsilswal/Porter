@@ -1,4 +1,4 @@
-import { stableHash, type Clock, type Logger } from "@porter/shared";
+import { PorterError, stableHash, type Clock, type Logger } from "@porter/shared";
 import type { AuditRecord, AuditStore } from "./ports.js";
 import type { CustomerField } from "./customer.js";
 
@@ -69,7 +69,8 @@ export class AuditLog {
     } catch (cause) {
       // An audit write must never take down a user-visible operation, but a
       // silent failure would be worse. Log loudly and continue.
-      this.#log.error("audit_append_failed", { tool: input.tool, outcome: input.outcome, cause: String(cause) });
+      // Database errors can embed SQL parameters containing private records.
+      this.#log.error("audit_append_failed", { tool: input.tool, outcome: input.outcome, code: PorterError.is(cause) ? cause.code : "unknown" });
     }
   }
 

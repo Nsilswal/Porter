@@ -1,2 +1,4 @@
 export { createMemoryStore, type MemoryStore } from "./memory.js";
+export { createPostgresStore, type PostgresStore, type PostgresStoreOptions } from "./postgres.js";
+export { migratePostgres } from "./migrations.js";
 export * as schema from "./schema.js";

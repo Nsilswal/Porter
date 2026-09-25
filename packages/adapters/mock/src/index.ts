@@ -1,6 +1,7 @@
 import {
   PorterError,
   money,
+  newId,
   untrusted,
   type Money,
 } from "@porter/shared";
@@ -319,7 +320,8 @@ export class MockAdapter implements ProviderAdapter {
       if (hold.key === key) this.#holds.delete(ref);
     }
     const record: BookingRecord = {
-      ref: `${this.id}_bk_${++this.#counter}`,
+      // Durable Porter records can outlive this simulated provider process.
+      ref: `${this.id}_${newId("bk")}`,
       providerKey: biz.key,
       serviceKey: service.key,
       locationId: request.locationId,

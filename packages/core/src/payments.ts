@@ -167,10 +167,11 @@ export class RecordingPaymentGateway implements PaymentGateway {
 export class MemoryPaymentProfileStore implements PaymentProfileStore {
   readonly #rows = new Map<string, PaymentProfile>();
   async get(userId: string): Promise<PaymentProfile | null> {
-    return this.#rows.get(userId) ?? null;
+    const profile = this.#rows.get(userId);
+    return profile ? structuredClone(profile) : null;
   }
   async put(userId: string, profile: PaymentProfile): Promise<void> {
-    this.#rows.set(userId, profile);
+    this.#rows.set(userId, structuredClone(profile));
   }
   async deleteAllForUser(userId: string): Promise<number> {
     return this.#rows.delete(userId) ? 1 : 0;
@@ -181,10 +182,10 @@ export class MemoryPaymentProfileStore implements PaymentProfileStore {
 export class MemoryPayoutDirectory implements PayoutDirectory {
   readonly #rows = new Map<string, string>();
   set(adapterId: string, providerId: string, accountRef: string): void {
-    this.#rows.set(`${adapterId}|${providerId}`, accountRef);
+    this.#rows.set(JSON.stringify([adapterId, providerId]), accountRef);
   }
   async lookup(adapterId: string, providerId: string): Promise<string | null> {
-    return this.#rows.get(`${adapterId}|${providerId}`) ?? null;
+    return this.#rows.get(JSON.stringify([adapterId, providerId])) ?? null;
   }
 }
 
@@ -193,14 +194,21 @@ export class MemoryPaymentStore implements PaymentStore {
   readonly rows: PaymentRecord[] = [];
   async put(record: PaymentRecord): Promise<void> {
     const existing = this.rows.findIndex((r) => r.id === record.id);
-    if (existing >= 0) this.rows[existing] = record;
-    else this.rows.push(record);
+    if (existing < 0) {
+      this.rows.push(structuredClone(record));
+      return;
+    }
+    const previous = this.rows[existing]!;
+    if (previous.userId !== record.userId || previous.bookingId !== record.bookingId || previous.gatewayId !== record.gatewayId || previous.gatewayPaymentRef !== record.gatewayPaymentRef) {
+      throw new Error("Payment identity cannot be changed.");
+    }
+    this.rows[existing] = structuredClone({ ...record, createdAt: previous.createdAt });
   }
   async listForBooking(userId: string, bookingId: string): Promise<PaymentRecord[]> {
-    return this.rows.filter((r) => r.userId === userId && r.bookingId === bookingId);
+    return this.rows.filter((r) => r.userId === userId && r.bookingId === bookingId).map((record) => structuredClone(record));
   }
   async listForUser(userId: string): Promise<PaymentRecord[]> {
-    return this.rows.filter((r) => r.userId === userId);
+    return this.rows.filter((r) => r.userId === userId).map((record) => structuredClone(record));
   }
   async deleteAllForUser(userId: string): Promise<number> {
     let n = 0;

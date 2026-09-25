@@ -116,7 +116,7 @@ describe("pay_or_deposit", () => {
       expect.unreachable();
     } catch (error) {
       const e = error as PorterError;
-      expect(e.code).toBe("PAYMENT_REQUIRED");
+      expect(e.code).toBe("IDEMPOTENCY_UNCERTAIN");
       expect(e.details.reason).toBe("authentication_required");
       expect(e.details.approval_url).toBe("https://bank.example/auth/123");
       // The message must tell the agent what to ask the user to do.

@@ -1,29 +1,19 @@
-# Local development only. Milestone 2 runs on the in-memory store, so neither
-# service is required yet; they are here so the Postgres work in milestone 3
-# has somewhere to land.
+# Local development only. Database is reachable only on the loopback interface.
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: porter
       POSTGRES_PASSWORD: porter
       POSTGRES_DB: porter
-    ports: ["5432:5432"]
-    volumes: ["porter-pgdata:/var/lib/postgresql/data"]
+    ports: ["127.0.0.1:55432:5432"]
+    # New volume for PostgreSQL 17; do not mount an old PostgreSQL 16 data dir.
+    volumes: ["porter-postgres:/var/lib/postgresql/data"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U porter"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  redis:
-    image: redis:7-alpine
-    ports: ["6379:6379"]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -U porter -d porter"]
+      interval: 2s
       timeout: 3s
-      retries: 10
+      retries: 15
 
 volumes:
-  porter-pgdata:
+  porter-postgres:
