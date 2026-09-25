@@ -1,9 +1,10 @@
 # Deploying Porter to Railway
 
-Railway hosts the remote MCP endpoint. The current server stores bookings and
-OAuth state in memory, so this guide is for a single-instance demo deployment.
-Restarting the service clears bookings. Do not add Postgres expecting it to
-persist them: the application does not yet read `DATABASE_URL`.
+Railway hosts the remote MCP endpoint. The personal demo can run in memory.
+Setting `DATABASE_URL` selects PostgreSQL storage for bookings, confirmation
+consumption, retry outcomes and audit records. This foundation does not yet
+include merchant onboarding or production email sign-in. Keep the existing
+personal demo separate from a future real-user pilot.
 
 ## 0. Check the image locally first
 
@@ -33,7 +34,7 @@ railway domain --port 8080
 Copy the generated `https://...up.railway.app` origin. Set variables below
 before deploying: the production image refuses to start without a signing
 secret. `railway up` then reads `railway.json`, builds from the `Dockerfile`,
-and health-checks `GET /healthz`.
+and health-checks `GET /readyz`.
 
 ## 2. Variables
 
@@ -66,9 +67,28 @@ support in a public connector submission.
 
 ## 3. Persistent storage
 
-Postgres and Redis are not used by the running app. Add them only after wiring
-the store and OAuth state to persistent implementations. Keep this deployment
-to one instance and demo data.
+For a persistent environment, add a Railway PostgreSQL service and set:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | Railway's private PostgreSQL connection URL |
+| `PORTER_STORAGE` | `postgres` |
+| `PORTER_ENCRYPTION_KEY` | A separate stable 32-byte random key, encoded as 64 hexadecimal characters |
+
+Keep `PORTER_SIGNING_SECRET` stable too. Run `node packages/db/dist/migrate.js`
+as the PostgreSQL environment's pre-deploy command before starting the server.
+Do not add that command to the memory-only demo. Startup checks schema history
+and the encryption key before accepting traffic; `/readyz` checks database
+access. `/healthz` remains process liveness.
+
+Migrations are transactional and checksum-verified. Back up the database and
+encryption/signing secrets, and exercise a restore into a separate environment
+before real onboarding. Do not rotate the encryption key by simply replacing
+the variable; existing encrypted data needs an explicit rewrapping procedure.
+
+Redis is not currently used. Rate limits and development OAuth sessions remain
+in memory. Production disables development OAuth. Static connector keys remain
+temporary until the pilot's individual credential lifecycle is implemented.
 
 ## 4. Verify the deployment
 
@@ -76,6 +96,7 @@ to one instance and demo data.
 BASE=https://<your-app>.up.railway.app
 
 curl -s $BASE/healthz
+curl -s $BASE/readyz
 curl -s $BASE/.well-known/oauth-protected-resource | jq
 curl -s -i -X POST $BASE/mcp -d '{}' | head -3     # expect 401 + WWW-Authenticate
 curl -s $BASE/docs | head -20
@@ -96,7 +117,8 @@ guaranteed MCP custom-connector flow, so verify the connection in Muse.
 
 ## Notes
 
-- **Scaling past one instance** needs Redis for the rate limiter and the
-  confirmation-token store, both of which are in-process today.
+- **Scaling past one instance** still requires shared rate limiting. With
+  PostgreSQL enabled, confirmation consumption and retry reservations are
+  already coordinated by database constraints.
 - **Do not rotate `PORTER_SIGNING_SECRET`** as routine hygiene. It is a
   user-visible action: outstanding confirmations stop working.

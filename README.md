@@ -1,16 +1,18 @@
 # Porter
 
+> **Current product direction (2026-09-24):** a self-serve Square salon/spa pilot with confirmed bookings through Muse. The [accepted PRD](docs/product-prd.md), [implementation plan](docs/implementation-plan.md), and [session handoff](docs/session-handoff.md) capture this next phase. The overview below describes the existing broader prototype; pilot onboarding and persistent merchant accounts are not implemented yet.
+
 One connector that lets an AI agent find, quote, book, reschedule, cancel and pay for local services — salons, barbers, nail studios, cleaners, plumbers, electricians, HVAC — across many businesses.
 
-Porter does not onboard businesses one at a time. It integrates with the booking and field-service software those businesses already run, and normalises all of it behind one small tool surface.
+The Square salon pilot adds self-serve merchant onboarding behind shared tools. Website content enriches the profile; official Square access supplies booking data and creates appointments.
 
 Targets Meta Muse first, and serves Claude and ChatGPT from the same MCP server.
 
-**Status: milestone 5 complete — all five milestones done.** Core, mock adapter and MCP server work end to end locally. Square Appointments and Jobber adapters pass the conformance suite. Stripe payments, cancellation fees, the audit trail and rate limiting are live. The Muse submission packet is assembled and validated.
+**Status: pilot foundations in progress.** The MCP demo runs locally. PostgreSQL now persists bookings, confirmations, encrypted retry outcomes and audit records; uncertain writes are held for reconciliation. The Square adapter has documentation-based regression coverage. Public onboarding, merchant OAuth/accounts, recovery tools and dashboards are not implemented yet. See [local development](docs/local-development.md) and [the Square integration contract](docs/square-integration-contract.md).
 
-Two things gate a real launch, both named in [`docs/muse-compliance.md`](docs/muse-compliance.md): **upstream rights clearance** under Connector Terms §4.2, and reading Meta's Data Protection Requirements.
+The [implementation plan](docs/implementation-plan.md) tracks remaining product and launch work, including the unresolved requirements in [the compliance notes](docs/muse-compliance.md). Historical milestone completion does not establish pilot readiness.
 
-> **Neither remote adapter may be pointed at a real account yet.** Both are tested against wire-level fakes built from published documentation, not recorded sandbox traffic, and the upstream rights question in `docs/plan.md` section 9 item 7 is unresolved. See [Provider adapters](#provider-adapters).
+> **Provider fixtures are synthetic.** Validate the official Square contract against a sandbox before a real pilot. The experimental public Square adapter is not the approved pilot booking path. See [Provider adapters](#provider-adapters).
 
 ---
 
@@ -37,14 +39,14 @@ No account, no key, no config. Prints the business, every service with real pric
 ### Run the tests
 
 ```bash
-pnpm test        # builds first, then runs 223 tests
+pnpm test        # builds first; PostgreSQL suites require TEST_DATABASE_URL
 pnpm build       # typecheck everything
 ```
 
 ### Drive it yourself with the MCP Inspector
 
 ```bash
-cp .env.example .env
+test -f .env || cp .env.example .env
 pnpm dev:mcp
 npx @modelcontextprotocol/inspector
 ```
@@ -79,10 +81,10 @@ packages/
   adapters/jobber/     home services, GraphQL
   adapters/web/        reads public booking pages; off by default
   adapters/square-public/  Square's public booking pages; books when no card is required; off by default
-  db/                  Drizzle schema, in-memory store
+  db/                  PostgreSQL store, migrations, encryption, in-memory test store
   payments-stripe/     Stripe Connect gateway
 apps/
-  mcp-server/          remote MCP over Streamable HTTP + OAuth 2.1
+  mcp-server/          remote MCP over Streamable HTTP; local development OAuth
 submission/            Muse form values, icon, validator, checklist
 legal/                 privacy notice, terms of service, incident runbook
 docs/                  research, plan, compliance mapping, deploy notes
@@ -107,14 +109,14 @@ docs/                  research, plan, compliance mapping, deploy notes
 | Adapter | Vertical | Shape | Slot hold | Quotes | Cancellation policy |
 |---|---|---|---|---|---|
 | `mock` | both | slots | yes | yes | yes |
-| `square-appointments` | beauty, wellness | slots, confirmed immediately | no | no | yes, from the booking profile |
+| `square-appointments` | beauty, wellness | slots; provider returns pending or confirmed | no | no | yes, from the booking profile |
 | `jobber` | home services | arrival windows, business confirms later | no | yes | none published |
 | `web` | both | reads public pages; **writes go to the user** | no | no | none published |
 | `square-public` | beauty, wellness | slots, confirmed immediately when no card is required | no | no | **yes, per service** |
 
-Square and Jobber are genuinely different products, and the difference is carried by capability flags rather than by branches in core:
+Square and Jobber expose different booking models through adapter capability flags:
 
-- **Square** publishes open slots. You book a specific minute with a specific team member and it is confirmed immediately. The team member id travels as `providerSlotRef`, because dropping it would silently rebook with someone else.
+- **Square** publishes open slots. You book a specific minute with a specific team member; the returned status reflects whether the merchant accepts it immediately or requires approval. The team member id travels as `providerSlotRef` so the selected staff member is preserved.
 - **Jobber** has no open-slot API at all. It is field-service software: a customer asks for work in an arrival window and the business schedules it afterwards. So `getAvailability` returns *requestable windows*, and a booking comes back `pending` rather than `confirmed`. Saying "confirmed" would tell the user something untrue.
 
 Adding both required **zero changes to `packages/core`**. The only change to an existing package was adding credential support to the conformance suite, which is test infrastructure.
@@ -132,7 +134,7 @@ Porter is built against the Muse Connector Terms and Policies, which are not mer
 
 **Cached availability is never bookable.** Slots carry a `fetchedAt` and are re-read from the provider immediately before committing. If the slot has gone, the call fails with `SLOT_TAKEN` and fresh alternatives attached, so the agent can offer a choice rather than dead-end the user.
 
-**Every write takes an idempotency key.** Same key and same payload replays the stored response. Same key and a *different* payload is a hard error — that is the case that catches real double-booking bugs. A failed call releases the key so a retry works.
+**Booking and payment writes take an idempotency key.** The same key and payload replay the stored response; a different payload is rejected. Validation failures before an external write can release the key. Once a write may have reached the provider, its durable reservation blocks retries until the outcome is known. Existing-booking mutations also hold a durable guard so different keys cannot act on the same stale record. Automatic reconciliation and operator recovery remain required before the pilot. The prototype messaging tool is outside this guarantee and the approved pilot scope.
 
 **Provider text is data, never instructions.** Business names and descriptions are user-editable in the upstream platform, so they are an injection surface. They are typed `UntrustedText` and cannot be serialised without passing through `sanitize()`. Hostile records live in the default fixture set, so every test run exercises this path.
 
@@ -162,7 +164,7 @@ Porter never stores or enters card details. It keeps opaque gateway references, 
 pnpm test
 ```
 
-223 tests: unit, adapter conformance, prompt injection, compliance, payments, multi-adapter routing, and integration tests that drive the real MCP server over real HTTP through a full booking lifecycle.
+The suite covers unit behavior, adapter conformance, prompt injection, confirmations, concurrent mutations, payments, routing, and the MCP booking lifecycle over real HTTP. Set `TEST_DATABASE_URL` to include PostgreSQL ownership, encryption, migration and server-restart tests; see [local development](docs/local-development.md).
 
 Any new adapter must pass the conformance suite in `packages/adapters/contract` unchanged. That is what makes "add a platform without touching core" a real claim.
 
