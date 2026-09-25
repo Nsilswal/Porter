@@ -41,9 +41,10 @@ describe("Square sandbox smoke harness", () => {
     expect(creates[0]!.body).toEqual(creates[1]!.body);
     expect(creates[0]!.body).toMatchObject({
       idempotency_key: report.runId,
-      booking: { customer_note: "Porter sandbox smoke test; synthetic customer; safe to delete." },
+      booking: { customer_note: `Porter sandbox smoke test ${report.runId}; synthetic customer; safe to delete.` },
     });
-    expect([...fake.customers.values()]).toMatchObject([{ phone_number: "+14155550100", email_address: `${report.runId}@example.com` }]);
+    expect([...fake.customers.values()]).toMatchObject([{ given_name: "Porter", phone_number: "+14155550101" }]);
+    expect([...fake.customers.values()][0]).not.toHaveProperty("email_address");
     expect(fake.bookings.size).toBe(1);
     expect([...fake.bookings.values()].every((booking) => booking.status === "CANCELLED_BY_CUSTOMER")).toBe(true);
     expect(report.checks).toContainEqual({ status: "pass", label: "Reschedule" });
@@ -56,7 +57,7 @@ describe("Square sandbox smoke harness", () => {
     let customerLookups = 0;
     const http: HttpClient = { async send(request) {
       if (request.url.endsWith("/customers/search") && ++customerLookups === 2) {
-        return { status: 200, headers: {}, body: { customers: [{ id: "CHANGED_CUSTOMER", phone_number: "+14155550100" }] } };
+        return { status: 200, headers: {}, body: { customers: [{ id: "CHANGED_CUSTOMER", phone_number: "+14155550101" }] } };
       }
       return fake.send(request);
     } };

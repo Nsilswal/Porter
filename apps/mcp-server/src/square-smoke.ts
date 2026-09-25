@@ -189,9 +189,9 @@ export async function runSquareSmoke(options: SquareSmokeOptions): Promise<Squar
       startsAt: slot.startsAt,
       endsAt: slot.endsAt,
       providerSlotRef: slot.providerSlotRef,
-      customer: Object.freeze({ givenName: "Porter", phone: "+14155550100", email: `${runId}@example.com` }),
+      customer: Object.freeze({ givenName: "Porter", phone: "+14155550101" }),
       idempotencyKey: runId,
-      notes: "Porter sandbox smoke test; synthetic customer; safe to delete.",
+      notes: `Porter sandbox smoke test ${runId}; synthetic customer; safe to delete.`,
     });
     stage = "Create booking";
     const booking = await call((ctx) => adapter.createBooking(createRequest, ctx));
