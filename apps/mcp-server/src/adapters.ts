@@ -37,6 +37,9 @@ export interface AdapterRegistry {
  *     packages/adapters/jobber/src/api.ts.
  */
 export function buildAdapters(config: PorterConfig, log: Logger): AdapterRegistry {
+  // Merchant routing is installed by the pilot runtime after its store opens.
+  // No deployment-wide provider credentials enter the pilot adapter registry.
+  if (config.pilot) return { adapters: [], credentials: {} };
   const adapters: ProviderAdapter[] = [];
   const credentials: Record<string, Record<string, string>> = {};
   const http = createFetchHttpClient();

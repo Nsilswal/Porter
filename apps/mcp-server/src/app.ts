@@ -5,10 +5,12 @@ import { createFetchHttpClient } from "@porter/shared";
 import { createMemoryStore, createPostgresStore } from "@porter/db";
 import { buildAdapters } from "./adapters.js";
 import { createLogger, systemClock, type Logger } from "@porter/shared";
-import { AuthServer, SCOPES } from "./auth.js";
+import { AuthServer, SCOPES, type AuthContext } from "./auth.js";
 import { buildMcpServer, createTransport } from "./server.js";
 import { loadConfig, validateStorageConfig, type PorterConfig } from "./config.js";
 import { connectorDocs } from "./docs.js";
+import { createPilotRuntime } from "./pilot/runtime.js";
+import type { PilotWeb } from "./pilot/web.js";
 
 export interface PorterApp {
   readonly server: Server;
@@ -18,6 +20,7 @@ export interface PorterApp {
   readonly auth: AuthServer;
   readonly store: Store;
   readonly config: PorterConfig;
+  readonly pilot: PilotWeb | undefined;
   listen(port?: number): Promise<number>;
   close(): Promise<void>;
 }
@@ -53,6 +56,13 @@ export async function createApp(overrides: Partial<PorterConfig> = {}): Promise<
     })
     : undefined;
   const store = persistent ?? createMemoryStore();
+  let pilot: PilotWeb | undefined;
+  try {
+    if (config.pilot) pilot = await createPilotRuntime(config.pilot, config.databaseUrl!, config.encryptionKey!);
+  } catch (error) {
+    await persistent?.close();
+    throw error;
+  }
 
   const engine = new BookingEngine({
     adapters,
@@ -87,7 +97,7 @@ export async function createApp(overrides: Partial<PorterConfig> = {}): Promise<
   let closing: Promise<void> | undefined;
   const server = createServer((req, res) => {
     if (closing) return sendJson(res, 503, { error: "shutting_down" });
-    handle(req, res, { engine, auth, log, config, sessions, ready: async () => { await persistent?.health(); } }).catch(() => {
+    handle(req, res, { engine, auth, log, config, sessions, pilot, ready: async () => { await persistent?.health(); await pilot?.options.store.health(); } }).catch(() => {
       // Driver/provider exceptions can contain query parameters or credentials.
       log.error("request_failed");
       if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
@@ -103,6 +113,7 @@ export async function createApp(overrides: Partial<PorterConfig> = {}): Promise<
     auth,
     store,
     config,
+    pilot,
     listen(port = config.port) {
       return new Promise<number>((resolve, reject) => {
         server.once("error", reject);
@@ -133,7 +144,9 @@ export async function createApp(overrides: Partial<PorterConfig> = {}): Promise<
           await drained;
         } finally {
           clearTimeout(deadline);
-          await persistent?.close();
+          const results = await Promise.allSettled([pilot?.options.store.close(), persistent?.close()]);
+          const failure = results.find((result) => result.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
         }
       })();
       return closing;
@@ -146,6 +159,7 @@ interface Deps {
   auth: AuthServer;
   log: Logger;
   config: PorterConfig;
+  pilot: PilotWeb | undefined;
   ready(): Promise<void>;
   sessions: Set<() => Promise<void>>;
 }
@@ -153,12 +167,13 @@ interface Deps {
 async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Promise<void> {
   const url = new URL(req.url ?? "/", deps.config.issuer);
   const path = url.pathname;
+  if (deps.pilot && await deps.pilot.handle(req, res, url)) return;
 
   if (path === "/healthz") return sendJson(res, 200, { ok: true });
   if (path === "/readyz") {
     try {
       await deps.ready();
-      return sendJson(res, 200, { ok: true, storage: deps.config.storage, mode: deps.config.demoMode ? "demo" : "provider" });
+      return sendJson(res, 200, { ok: true, storage: deps.config.storage, mode: deps.config.pilot ? `pilot-${deps.config.pilot.environment}` : deps.config.demoMode ? "demo" : "provider" });
     } catch {
       return sendJson(res, 503, { ok: false });
     }
@@ -179,7 +194,9 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   }
 
   if (path === "/.well-known/oauth-protected-resource") {
-    return sendJson(res, 200, deps.auth.protectedResourceMetadata());
+    const metadata = deps.auth.protectedResourceMetadata();
+    if (deps.pilot) metadata.scopes_supported = ["bookings:read", "bookings:write"];
+    return sendJson(res, 200, metadata);
   }
   if (path === "/.well-known/oauth-authorization-server") {
     return sendJson(res, 200, deps.auth.authorizationServerMetadata());
@@ -249,7 +266,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   // complete record of what their agent did, and Porter can back that — from
   // hashes and outcomes alone, because the log holds no personal data.
   if (path === "/v1/audit" && req.method === "GET") {
-    const ctx = deps.auth.authenticate(req.headers.authorization, req.headers["x-api-key"]);
+    const ctx = await authenticate(req, deps);
     if (!ctx) {
       res.writeHead(401, { "WWW-Authenticate": deps.auth.challengeHeader(), "Content-Type": "application/json" });
       return void res.end(JSON.stringify({ error: "unauthorized" }));
@@ -262,14 +279,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   }
 
   if (path === "/mcp") {
-    const ctx = deps.auth.authenticate(req.headers.authorization, req.headers["x-api-key"]);
+    const ctx = await authenticate(req, deps);
     if (!ctx) {
       res.writeHead(401, { "WWW-Authenticate": deps.auth.challengeHeader(), "Content-Type": "application/json" });
       return void res.end(JSON.stringify({ error: "unauthorized" }));
     }
 
     const actor: Actor = { id: ctx.userId };
-    const mcp = buildMcpServer(deps.engine, actor, deps.log.child({ actor: ctx.userId, auth: ctx.method }));
+    const mcp = buildMcpServer(deps.engine, actor, deps.log.child({ actor: ctx.userId, auth: ctx.method }), { pilot: Boolean(deps.pilot), scopes: ctx.scopes });
     const transport = createTransport();
 
     let closed: Promise<void> | undefined;
@@ -296,6 +313,18 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   }
 
   sendJson(res, 404, { error: "not_found" });
+}
+
+async function authenticate(req: IncomingMessage, deps: Deps): Promise<AuthContext | null> {
+  if (!deps.pilot) return deps.auth.authenticate(req.headers.authorization, req.headers["x-api-key"]);
+  const authorization = req.headers.authorization;
+  const apiKey = req.headers["x-api-key"];
+  if (Array.isArray(apiKey)) return null;
+  const bearer = authorization ? /^Bearer (porter_[A-Za-z0-9_-]{43})$/i.exec(authorization)?.[1] : undefined;
+  if (authorization && !bearer) return null;
+  if (bearer && apiKey && bearer !== apiKey) return null;
+  const userId = await deps.pilot.options.accounts.authenticateConnector(bearer ?? apiKey ?? "");
+  return userId ? { userId, scopes: ["bookings:read", "bookings:write"], method: "api_key" } : null;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {

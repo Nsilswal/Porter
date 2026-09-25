@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
+import { loadPilotConfig, type PilotConfig } from "./pilot/config.js";
 
 export interface PorterConfig {
+  readonly pilot: PilotConfig | undefined;
   readonly port: number;
   readonly issuer: string;
   readonly signingSecret: string;
@@ -55,6 +57,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
   }
 
   const config: PorterConfig = {
+    pilot: loadPilotConfig(env, overrides.issuer ?? issuer),
     port,
     issuer,
     signingSecret: env.PORTER_SIGNING_SECRET ?? "",
@@ -62,7 +65,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
     logLevel: (env.LOG_LEVEL as PorterConfig["logLevel"]) ?? "info",
     demoMode: env.PORTER_DEMO_MODE !== "false",
     encryptionKey: env.PORTER_ENCRYPTION_KEY || undefined,
-    devOAuthEnabled: env.NODE_ENV !== "production",
+    devOAuthEnabled: env.NODE_ENV !== "production" && env.PORTER_PILOT_ENABLED !== "true",
     adapterLatencyMs: Number(env.PORTER_MOCK_LATENCY_MS ?? 0),
     adapterFailureRate: Number(env.PORTER_MOCK_FAILURE_RATE ?? 0),
     squareAccessToken: env.PORTER_SQUARE_ACCESS_TOKEN || undefined,
@@ -99,6 +102,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Part
 
 /** Validate the final configuration, including programmatic overrides. */
 export function validateStorageConfig(config: PorterConfig): void {
+  if (config.pilot) {
+    if (config.storage !== "postgres") throw new Error("The salon pilot requires PostgreSQL.");
+    if (config.demoMode || config.devOAuthEnabled || Object.keys(config.apiKeys).length || config.squareAccessToken || config.jobberAccessToken || config.stripeSecretKey || config.webSourcesPath || config.squarePublicSourcesPath) {
+      throw new Error("Run the salon pilot separately from mock/demo auth, static keys, global provider tokens and payment adapters.");
+    }
+    if (config.pilot.origin !== config.issuer) throw new Error("The pilot origin must match the configured issuer.");
+  }
   if (config.storage === "memory") {
     if (!config.demoMode || config.squareAccessToken || config.jobberAccessToken || config.squarePublicSourcesPath || config.stripeSecretKey) {
       throw new Error("Provider writes require PostgreSQL. Memory storage is only for the mock demo; set DATABASE_URL and PORTER_ENCRYPTION_KEY.");
