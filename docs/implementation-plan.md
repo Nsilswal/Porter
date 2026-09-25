@@ -8,7 +8,7 @@ The approved product requirements are in [product-prd.md](./product-prd.md). For
 
 The first change implements PostgreSQL storage and migrations, wrapped encryption keys, durable retry/confirmation state, stronger confirmation binding, Square adapter contract corrections, and startup/readiness/shutdown checks. See [local development](./local-development.md) and [the Square integration contract](./square-integration-contract.md).
 
-Phase 0 remains open for sandbox OAuth/API and Muse validation. The developer account is accessible; creation of the prepared test application is awaiting the user's confirmation of Square's Developer Terms. Phase 1 remains open for merchant identities/connections, email sign-in, individual connector credential issuance, and reconciliation. Public onboarding and dashboards have not shipped. Do not label either phase complete based on the foundation tests.
+Phase 0 remains open for OAuth, policy variants, isolation, notifications and Muse validation. The user accepted the Developer Terms. The application and a dedicated sandbox seller now exist; the exact seven buyer scopes passed discovery, create, identical replay, time-only reschedule and cancellation. See the [sandbox validation record](square-sandbox-validation.md). The merchant OAuth redirect/refresh/revocation lifecycle remains unimplemented. Phase 1 remains open for merchant identities/connections, email sign-in, individual connector credential issuance, and reconciliation. Public onboarding and dashboards have not shipped. Do not label either phase complete based on the foundation tests.
 
 ## Current implementation and gaps
 
@@ -18,7 +18,7 @@ Phase 0 remains open for sandbox OAuth/API and Muse validation. The developer ac
 | Booking engine | `packages/core/src/engine.ts` handles confirmations, slot rechecks, durable idempotency/guards and adapter routing. | Route through merchant-scoped connections and safely reconcile uncertain upstream writes. |
 | Persistence | `app.ts` now selects PostgreSQL from `DATABASE_URL`; explicit migrations and production stores are implemented in `packages/db`. | Add merchant/account records and reconciliation on top of durable booking/confirmation/retry storage. |
 | Merchant credentials | `apps/mcp-server/src/adapters.ts` reads a deployment-wide Square token; core indexes credentials by adapter ID. | Model many merchant connections and authorize each request against the correct merchant/location. |
-| Square adapter | `packages/adapters/square-appointments` implements API calls against fixtures. | Validate with provider environments, real response shapes, scope/plan requirements, policies, notifications, and errors. |
+| Square adapter | `packages/adapters/square-appointments` passed one buyer-mode sandbox lifecycle and has recorded response regressions. | Extend validation to policy/price variants, notifications, isolation and recovery; implement the actual merchant OAuth journey. |
 | Public pages | `packages/adapters/web` reads pages; `square-public` contains experimental undocumented booking endpoints. | Build a reviewed import pipeline. Use the official Square integration for the pilot's booking contract. |
 | Product UI | No public onboarding, merchant dashboard, or operator console. | Build the approved journeys and account management. |
 | Search | Current `SearchArgs` requires category; there is no first-class business-name argument. | Add explicit active-business name/location lookup without relying on category matching. |
@@ -66,6 +66,7 @@ Exit: an invited owner can go from public URL to an active eligible business wit
 - Preserve the confirmation/recheck design. Bind each operation to the customer, merchant, selected service/staff/time, price, and current terms.
 - Persist request/outcome state before and after provider calls. Reconcile timeouts/crashes with stable provider idempotency/reference data before retrying.
 - Support creation, listing, rescheduling, and cancellation of Porter-originated appointments. Verify ownership on every operation; do not import unrelated customer appointment history.
+- Restrict buyer rescheduling to time changes with the original staff, service and duration. Filter unsupported choices before confirmation and handle definite pre-write rejection without leaving an unnecessary uncertain guard; do not weaken protection for ambiguous provider outcomes.
 - Define pilot tool exposure so payment, home-service quote, and unsupported messaging tools cannot imply unsupported capabilities. Keep mock/demo capabilities in their own environment.
 - Return actual provider status. A pending, failed, or uncertain response is never a confirmed appointment. Show changes in terms and require fresh confirmation when appropriate.
 - Validate notification behavior for the selected API permission mode, then fill only necessary gaps. Do not assume Square always sends messages after every API write.

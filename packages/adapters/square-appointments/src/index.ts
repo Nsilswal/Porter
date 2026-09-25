@@ -70,6 +70,9 @@ interface CatalogEntry {
 
 const DEFAULT_BASE = "https://connect.squareup.com";
 const DEFAULT_API_VERSION = "2025-01-23";
+// The reference requires 24 hours; sandbox also rejects sub-hour searches.
+// Keep the upstream range valid and apply the caller's narrower bounds locally.
+const MIN_AVAILABILITY_RANGE_MS = 24 * 60 * 60_000;
 
 /**
  * Square Appointments adapter.
@@ -173,19 +176,12 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     assertNotAborted(ctx.signal, this.id);
     const { locationId, variation } = await this.#resolveService(query.providerId, query.serviceId, ctx, true);
 
-    // A one-minute window either side: Square matches on exact start times.
-    const from = new Date(query.startsAt.getTime() - 60_000);
-    const to = new Date(query.startsAt.getTime() + 60_000);
-    const slots = await this.#searchAvailability(locationId, variation, from, to, 10, ctx);
-
-    return (
-      slots.find(
-        (s) =>
-          s.startsAt.getTime() === query.startsAt.getTime() &&
-          // If a specific team member was chosen, that person must still be free.
-          (query.providerSlotRef === undefined || s.providerSlotRef === query.providerSlotRef),
-      ) ?? null
+    // A point range is filtered locally after widening Square's request. Match
+    // the chosen team member before limiting, even when many people are free.
+    const slots = await this.#searchAvailability(
+      locationId, variation, query.startsAt, query.startsAt, 1, ctx, query.providerSlotRef,
     );
+    return slots[0] ?? null;
   }
 
   async getCancellationPolicy(bookingRef: string, ctx: AdapterContext): Promise<CancellationPolicy> {
@@ -287,6 +283,22 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     assertSupportedBooking(profile, variation);
     const durationMinutes = appointmentDuration(request.startsAt, request.endsAt);
     const segment = existing.appointment_segments?.[0];
+    // Buyer permissions allow a sparse start_at update, but appointment_segments
+    // become immutable after creation. Omitting them is safe only when it keeps
+    // the requested service, duration, and person exactly as booked. A seller's
+    // subscription capability does not grant this token seller permissions.
+    if (
+      existing.appointment_segments?.length !== 1 ||
+      segment?.service_variation_id !== variation.variationId ||
+      segment.duration_minutes !== durationMinutes ||
+      !segment.team_member_id ||
+      (request.providerSlotRef !== undefined && request.providerSlotRef !== segment.team_member_id)
+    ) {
+      throw new PorterError("UNSUPPORTED_CAPABILITY", "This appointment can only move to a new time with the same service, staff member, and duration. Contact the salon for other changes.");
+    }
+    if (existing.version === undefined || !Number.isSafeInteger(existing.version) || existing.version < 0) {
+      throw new PorterError("ADAPTER_DOWN", "The booking's current version could not be verified. Please try again before making a change.");
+    }
 
     const res = await this.#request<BookingResponse>(
       "PUT",
@@ -298,14 +310,6 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
           // booking changed underneath us fails rather than clobbering.
           version: existing.version,
           start_at: request.startsAt.toISOString(),
-          appointment_segments: [
-            {
-              duration_minutes: durationMinutes,
-              service_variation_id: variation.variationId,
-              service_variation_version: variation.variationVersion,
-              team_member_id: request.providerSlotRef ?? segment?.team_member_id,
-            },
-          ],
         },
       },
       ctx,
@@ -478,14 +482,18 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     to: Date,
     limit: number,
     ctx: AdapterContext,
+    teamMemberId?: string,
   ): Promise<Slot[]> {
+    const fromMs = from.getTime();
+    const toMs = to.getTime();
+    const upstreamTo = new Date(Math.max(toMs, fromMs + MIN_AVAILABILITY_RANGE_MS));
     const res = await this.#request<SearchAvailabilityResponse>(
       "POST",
       "/v2/bookings/availability/search",
       {
         query: {
           filter: {
-            start_at_range: { start_at: from.toISOString(), end_at: to.toISOString() },
+            start_at_range: { start_at: from.toISOString(), end_at: upstreamTo.toISOString() },
             location_id: locationId,
             segment_filters: [{ service_variation_id: variation.variationId }],
           },
@@ -497,6 +505,11 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
     const out: Slot[] = [];
     for (const a of res.availabilities ?? []) {
       const segment = a.appointment_segments?.[0];
+      const startMs = new Date(a.start_at).getTime();
+      // The wider provider query must not widen the customer's requested
+      // window or replace their chosen person. Filter before counting results.
+      if (!Number.isFinite(startMs) || startMs < fromMs || startMs > toMs) continue;
+      if (teamMemberId !== undefined && segment?.team_member_id !== teamMemberId) continue;
       const duration = segment?.duration_minutes ?? variation.service.durationMinutes;
       out.push(
         mapSlot(

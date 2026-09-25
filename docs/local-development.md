@@ -65,6 +65,16 @@ The second command includes real PostgreSQL concurrency, isolation, encryption a
 
 Follow [the Square integration contract](square-integration-contract.md) for developer setup, buyer permissions and remaining live checks. Keep the existing Railway personal demo separate. Mildred is a public reference, not a participating pilot business.
 
+The dedicated sandbox seller has passed the adapter lifecycle; see the [validation record](square-sandbox-validation.md). Keep its scoped access token in an ignored `.env.square-sandbox`, separate from the normal `.env`. Set `PORTER_SQUARE_BASE_URL=https://connect.squareupsandbox.com` and `PORTER_SQUARE_ACCESS_TOKEN` there, without committing either credentials or customer data.
+
+```sh
+chmod 600 .env.square-sandbox
+pnpm build
+node --env-file=.env.square-sandbox apps/mcp-server/dist/square-smoke.js
+```
+
+This creates synthetic customers and appointments in Square's sandbox and attempts to cancel all observed bookings. Follow any cleanup/uncertain-outcome instructions before rerunning. It does not test merchant sign-in or Muse. No production override is supported.
+
 ## Uncertain outcomes
 
 Before an external mutation, Porter persists its operation identity and marks the outcome uncertain. If a provider response is lost or local persistence fails afterward, Porter keeps that reservation. Repeating the same request does not resubmit the mutation, even after its retention timestamp. A completed result is replayed after restart without requiring a still-valid confirmation token.

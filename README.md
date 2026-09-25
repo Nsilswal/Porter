@@ -8,11 +8,11 @@ The Square salon pilot adds self-serve merchant onboarding behind shared tools. 
 
 Targets Meta Muse first, and serves Claude and ChatGPT from the same MCP server.
 
-**Status: pilot foundations in progress.** The MCP demo runs locally. PostgreSQL now persists bookings, confirmations, encrypted retry outcomes and audit records; uncertain writes are held for reconciliation. The Square adapter has documentation-based regression coverage. Public onboarding, merchant OAuth/accounts, recovery tools and dashboards are not implemented yet. See [local development](docs/local-development.md) and [the Square integration contract](docs/square-integration-contract.md).
+**Status: pilot foundations in progress.** The MCP demo runs locally. PostgreSQL now persists bookings, confirmations, encrypted retry outcomes and audit records; uncertain writes are held for reconciliation. The Square adapter passed a scoped sandbox create/replay/time-change/cancel lifecycle with recorded regressions. Public onboarding, merchant OAuth/accounts, recovery tools and dashboards are not implemented yet. See [local development](docs/local-development.md) and [the sandbox validation record](docs/square-sandbox-validation.md).
 
 The [implementation plan](docs/implementation-plan.md) tracks remaining product and launch work, including the unresolved requirements in [the compliance notes](docs/muse-compliance.md). Historical milestone completion does not establish pilot readiness.
 
-> **Provider fixtures are synthetic.** Validate the official Square contract against a sandbox before a real pilot. The experimental public Square adapter is not the approved pilot booking path. See [Provider adapters](#provider-adapters).
+> **Most provider fixtures are synthetic.** Square's explicitly marked recorded fixtures cover one sandbox configuration; policy variants, OAuth, isolation and Muse still need validation before a real pilot. The experimental public Square adapter is not the approved pilot booking path. See [Provider adapters](#provider-adapters).
 
 ---
 
@@ -124,7 +124,7 @@ Adding both required **zero changes to `packages/core`**. The only change to an 
 ### Before either talks to a real account
 
 1. **Upstream rights clearance.** Connector Terms 4.2 requires Porter to represent it can sublicense provider data to Meta under 3.1, and section 8 makes Porter indemnify Meta for it. Square's and Jobber's developer terms have not been reviewed.
-2. **Re-record the fixtures.** Both adapters are tested against wire-level fakes written from published documentation. Square's API is fully documented, so its shapes are solid. **Jobber's full schema sits behind a developer login**, so the mutation inputs are inferred — every one is listed under `VERIFICATION STATUS` at the top of `packages/adapters/jobber/src/api.ts`.
+2. **Extend provider validation.** Both adapters use fakes based on published documentation. Square now also has sanitized responses from one successful sandbox lifecycle; remaining variants are tracked in the [validation record](docs/square-sandbox-validation.md). **Jobber's full schema sits behind a developer login**, so its mutation inputs are inferred — every one is listed under `VERIFICATION STATUS` at the top of `packages/adapters/jobber/src/api.ts`.
 
 ## How the design is shaped by the platform
 

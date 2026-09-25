@@ -1,0 +1,10 @@
+{
+  "errors": [
+    {
+      "category": "INVALID_REQUEST_ERROR",
+      "code": "INVALID_TIME_RANGE",
+      "detail": "Min query range is 1 hour.",
+      "field": "query.filter.start_at_range"
+    }
+  ]
+}

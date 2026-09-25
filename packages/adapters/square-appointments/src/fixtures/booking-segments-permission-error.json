@@ -1,0 +1,10 @@
+{
+  "errors": [
+    {
+      "code": "INSUFFICIENT_SCOPES",
+      "category": "AUTHENTICATION_ERROR",
+      "field": "booking.appointment_segments",
+      "detail": "The application is not allowed to update this field once written since it does not have all the required permissions: APPOINTMENTS_ALL_READ, APPOINTMENTS_ALL_WRITE."
+    }
+  ]
+}

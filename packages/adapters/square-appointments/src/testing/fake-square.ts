@@ -3,6 +3,8 @@ import locationsFixture from "../fixtures/locations.json" with { type: "json" };
 import catalogFixture from "../fixtures/catalog.json" with { type: "json" };
 import profileFixture from "../fixtures/business-booking-profile.json" with { type: "json" };
 import teamFixture from "../fixtures/team-members.json" with { type: "json" };
+import shortAvailabilityRangeFixture from "../fixtures/availability-range-error.json" with { type: "json" };
+import immutableSegmentsFixture from "../fixtures/booking-segments-permission-error.json" with { type: "json" };
 import type { SquareBooking, SquareCatalogObject, SquareCustomer, SquareLocation } from "../api.js";
 
 /**
@@ -14,10 +16,11 @@ import type { SquareBooking, SquareCatalogObject, SquareCustomer, SquareLocation
  * genuine request building, response parsing, mapping and error handling —
  * none of which a static response stub would reach.
  *
- * What it does NOT do is prove Porter matches Square's live behaviour. The
- * fixtures were authored from Square's documentation, not recorded from a
- * real sandbox. They must be re-recorded against Square sandbox credentials
- * before this adapter talks to anything real. See docs/plan.md, milestone 3.
+ * This is synthetic test data, not a recording of the seller's account. The
+ * availability-range and immutable-segment errors reproduce literal errors
+ * observed in sandbox; the rest models the published reference and buyer
+ * permissions. Passing these tests alone does not verify live behavior.
+ * See docs/square-integration-contract.md.
  */
 export interface FakeSquareOptions {
   /** Fail every call, to check error mapping. */
@@ -82,6 +85,11 @@ export class FakeSquare implements HttpClient {
       return json(200, teamFixture);
     }
     if (request.method === "POST" && path === "/v2/bookings/availability/search") {
+      const range = (request.body as { query?: { filter?: { start_at_range?: { start_at?: string; end_at?: string } } } })?.query?.filter?.start_at_range;
+      const durationMs = Date.parse(range?.end_at ?? "") - Date.parse(range?.start_at ?? "");
+      if (!Number.isFinite(durationMs) || durationMs < 60 * 60_000) {
+        return json(400, shortAvailabilityRangeFixture);
+      }
       return json(200, { availabilities: this.#availability(request.body) });
     }
     if (request.method === "POST" && path === "/v2/customers/search") {
@@ -181,6 +189,11 @@ export class FakeSquare implements HttpClient {
   #update(existing: StoredBooking, body: unknown): HttpResponse {
     const payload = body as { booking?: SquareBooking & { version?: number } };
     const incoming = payload.booking;
+    // The pilot uses buyer permissions. Even repeating unchanged segments is
+    // forbidden after creation; time-only rescheduling must be a sparse update.
+    if (incoming && Object.hasOwn(incoming, "appointment_segments")) {
+      return json(403, immutableSegmentsFixture);
+    }
 
     // Optimistic concurrency, exactly as Square does it.
     if (incoming?.version !== undefined && incoming.version !== existing.version) {
@@ -188,7 +201,7 @@ export class FakeSquare implements HttpClient {
     }
 
     const newStart = incoming?.start_at;
-    const segment = incoming?.appointment_segments?.[0] ?? existing.appointment_segments?.[0];
+    const segment = existing.appointment_segments?.[0];
     if (newStart) {
       const clash = [...this.bookings.values()].some(
         (b) =>
@@ -200,7 +213,6 @@ export class FakeSquare implements HttpClient {
       if (clash) return json(409, { errors: [{ category: "INVALID_REQUEST_ERROR", code: "BOOKING_CONFLICT" }] });
       existing.start_at = newStart;
     }
-    if (incoming?.appointment_segments) existing.appointment_segments = incoming.appointment_segments;
     existing.version += 1;
     existing.updated_at = new Date().toISOString();
     return json(200, { booking: existing });
