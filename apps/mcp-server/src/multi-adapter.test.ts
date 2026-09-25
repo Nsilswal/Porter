@@ -75,7 +75,7 @@ describe("multi-adapter routing", () => {
       givenName: "Sam",
       familyName: "Rivera",
       email: "sam@example.com",
-      phone: "555-0100",
+      phone: "+14155550100",
     });
     // Square confirms immediately.
     expect(square.booking.status).toBe("confirmed");
@@ -103,7 +103,7 @@ describe("multi-adapter routing", () => {
       givenName: "Sam",
       familyName: "Rivera",
       email: "sam@example.com",
-      phone: "555-0100",
+      phone: "+14155550100",
       addressLine1: "12 Oak St",
       city: "Oakland",
       region: "CA",
@@ -131,7 +131,7 @@ describe("multi-adapter routing", () => {
   it("shows a real Square policy and an unknown Jobber one", async () => {
     const h = harness();
 
-    const square = await bookThrough(h, "haircut", "square", { givenName: "Sam", email: "sam@example.com", phone: "555-0100" });
+    const square = await bookThrough(h, "haircut", "square", { givenName: "Sam", email: "sam@example.com", phone: "+14155550100" });
     const squareCancel = (await h.engine.cancelBooking(h.actor, { booking_id: square.booking.booking_id, idempotency_key: "c-sq" }, h.signal)) as ConfirmationEnvelope;
     expect(squareCancel.cancellationPolicy.known).toBe(true);
     expect(squareCancel.cancellationPolicy.feeAmount).toBeNull();

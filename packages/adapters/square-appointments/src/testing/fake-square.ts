@@ -86,9 +86,13 @@ export class FakeSquare implements HttpClient {
     }
     if (request.method === "POST" && path === "/v2/customers/search") {
       const filter = (request.body as { query?: { filter?: { email_address?: { exact?: string }; phone_number?: { exact?: string } } } })?.query?.filter;
+      const phone = filter?.phone_number?.exact?.replace(/[ ()-]/g, "");
+      if (phone !== undefined && !/^\+[1-9]\d{1,14}$/.test(phone)) {
+        return json(400, { errors: [{ category: "INVALID_REQUEST_ERROR", code: "INVALID_VALUE", field: "query.filter.phone_number.exact" }] });
+      }
       const hit = [...this.customers.values()].find((c) =>
         (!filter?.email_address?.exact || c.email_address === filter.email_address.exact) &&
-        (!filter?.phone_number?.exact || c.phone_number === filter.phone_number.exact),
+        (phone === undefined || c.phone_number?.replace(/[ ()-]/g, "") === phone),
       );
       return json(200, hit ? { customers: [hit] } : {});
     }

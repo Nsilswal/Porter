@@ -48,8 +48,42 @@ describe("Square documented booking requirements", () => {
     await expect(adapter.createBooking({ ...request, customer: { givenName: "Sam", email: "sam@example.com" } }, context()))
       .rejects.toSatisfy(hasCode("INVALID_REQUEST"));
     expect(adapter.capabilities.requiredCustomerFields).toContain("phone");
+    expect(fake.requests).toHaveLength(0);
     expect(fake.customers.size).toBe(0);
     expect(fake.bookings.size).toBe(0);
+  });
+
+  it.each(["555-0100", "4155550100", "+04155550100", "+14155550100 ext 2", "+1234567890123456"])(
+    "rejects phone %s before HTTP without guessing a country code",
+    async (phone) => {
+      const { adapter, fake } = build();
+      const request = bookingRequest();
+      await expect(adapter.createBooking({ ...request, customer: { ...request.customer, phone } }, context()))
+        .rejects.toMatchObject({ code: "INVALID_REQUEST", message: expect.stringContaining("country code") });
+      expect(fake.requests).toHaveLength(0);
+    },
+  );
+
+  it("normalizes explicit international display formatting for search and creation", async () => {
+    const { adapter, fake } = build();
+    const request = bookingRequest();
+    await adapter.createBooking({ ...request, customer: { ...request.customer, phone: " +1 (415) 555-0100 " } }, context());
+    expect(fake.requests.find((entry) => entry.path === "/v2/customers/search")?.body)
+      .toMatchObject({ query: { filter: { phone_number: { exact: "+14155550100" } } } });
+    expect(fake.requests.find((entry) => entry.path === "/v2/customers")?.body)
+      .toMatchObject({ phone_number: "+14155550100" });
+  });
+
+  it("makes the Square fake reject non-international exact phone searches", async () => {
+    const fake = new FakeSquare();
+    const result = await fake.send({
+      method: "POST",
+      url: "https://connect.squareupsandbox.com/v2/customers/search",
+      headers: { authorization: `Bearer ${SQUARE_TEST_TOKEN}`, "square-version": "2025-01-23" },
+      body: { query: { filter: { phone_number: { exact: "555-0100" } } } },
+    });
+    expect(result.status).toBe(400);
+    expect(fake.customers.size).toBe(0);
   });
 
   it("does not reuse a same-email customer with a different phone", async () => {

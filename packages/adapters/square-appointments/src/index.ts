@@ -226,6 +226,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
   async createBooking(request: CreateBookingRequest, ctx: AdapterContext): Promise<Booking> {
     assertNotAborted(ctx.signal, this.id);
     validateIdempotencyKey(request.idempotencyKey);
+    const customer = { ...request.customer, phone: normalizeCustomerPhone(request.customer.phone) };
     const { locationId, variation } = await this.#resolveService(request.providerId, request.serviceId, ctx);
     if (request.locationId !== `${this.id}:${locationId}`) {
       throw new PorterError("INVALID_REQUEST", "The appointment location does not match the selected business.");
@@ -237,7 +238,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
       throw new PorterError("INVALID_REQUEST", "Choose an available appointment before booking.");
     }
     const durationMinutes = appointmentDuration(request.startsAt, request.endsAt);
-    const customerId = await this.#ensureCustomer(request.customer, request.idempotencyKey, ctx);
+    const customerId = await this.#ensureCustomer(customer, request.idempotencyKey, ctx);
 
     const res = await this.#request<BookingResponse>(
       "POST",
@@ -557,8 +558,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
    * Search-before-create avoids piling up duplicate customer records in the
    * seller's account on every repeat booking.
    */
-  async #ensureCustomer(customer: CreateBookingRequest["customer"], idempotencyKey: string, ctx: AdapterContext): Promise<string> {
-    if (!customer.phone?.trim()) throw new PorterError("INVALID_REQUEST", "Square requires a phone number for this appointment.");
+  async #ensureCustomer(customer: CreateBookingRequest["customer"] & { readonly phone: string }, idempotencyKey: string, ctx: AdapterContext): Promise<string> {
     const found = await this.#request<SearchCustomersResponse>(
       "POST",
       "/v2/customers/search",
@@ -582,7 +582,7 @@ export class SquareAppointmentsAdapter implements ProviderAdapter {
         ...(customer.givenName ? { given_name: customer.givenName } : {}),
         ...(customer.familyName ? { family_name: customer.familyName } : {}),
         ...(customer.email ? { email_address: customer.email } : {}),
-        ...(customer.phone ? { phone_number: customer.phone } : {}),
+        phone_number: customer.phone,
       },
       ctx,
     );
@@ -617,6 +617,15 @@ function validateIdempotencyKey(key: string): void {
   if (!key || key.length > 255) {
     throw new PorterError("INVALID_REQUEST", "The booking request needs a valid idempotency key.");
   }
+}
+
+/** Exact customer search requires an explicit international country code. */
+function normalizeCustomerPhone(value: string | undefined): string {
+  const phone = value?.trim().replace(/[ ()-]/g, "") ?? "";
+  if (!/^\+[1-9]\d{1,14}$/.test(phone)) {
+    throw new PorterError("INVALID_REQUEST", "Provide a phone number with + and its country code, such as +14155550100.");
+  }
+  return phone;
 }
 
 function appointmentDuration(startsAt: Date, endsAt: Date): number {
