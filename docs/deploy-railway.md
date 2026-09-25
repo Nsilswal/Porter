@@ -1,124 +1,197 @@
-# Deploying Porter to Railway
+# Deploy the salon pilot to Railway
 
-Railway hosts the remote MCP endpoint. The personal demo can run in memory.
-Setting `DATABASE_URL` selects PostgreSQL storage for bookings, confirmation
-consumption, retry outcomes and audit records. This foundation does not yet
-include merchant onboarding or production email sign-in. Keep the existing
-personal demo separate from a future real-user pilot.
+Porter's website and MCP endpoint run in the **same Node service**. It renders
+onboarding, sign-in, owner and connection pages and serves `/mcp`. Deploy the
+repository once, with a separate PostgreSQL service. No separate frontend host
+or static-site build is needed.
 
-## 0. Check the image locally first
+This recipe creates a **Square sandbox web pilot**. Publishing Porter in Muse is
+separate: customers will choose **Connect → Porter sign-in and consent → return
+to Muse**, with OAuth credentials exchanged automatically and no API key entry.
 
-The Dockerfile is verified: it builds, runs as a non-root `node` user, and
-serves health, discovery, `/docs` and the MCP handshake.
+## 1. Configure the application and database
 
-```bash
-docker build -t porter .
-docker run --rm -p 8080:8080 \
-  -e PORTER_ISSUER=http://127.0.0.1:8080 \
-  -e PORTER_SIGNING_SECRET=$(openssl rand -hex 32) \
-  -e PORTER_API_KEYS=demo-key:user_demo \
-  porter
+Create a separate Railway environment or project for the pilot, with a fresh
+PostgreSQL service and an application service connected to `Nsilswal/Porter`,
+branch `main`. Use separate secrets from the personal demo.
+[Railway PostgreSQL setup](https://docs.railway.com/databases/postgresql).
 
-curl -s localhost:8080/healthz
-```
+Set these application service settings explicitly:
 
-## 1. Create the service and domain
-
-```bash
-railway login
-railway init --name porter
-railway add --service porter
-railway domain --port 8080
-```
-
-Copy the generated `https://...up.railway.app` origin. Set variables below
-before deploying: the production image refuses to start without a signing
-secret. `railway up` then reads `railway.json`, builds from the `Dockerfile`,
-and health-checks `GET /readyz`.
-
-## 2. Variables
-
-Set these in the Railway dashboard, not in the repo.
-
-| Variable | Value | Why it matters |
-|---|---|---|
-| `PORTER_ISSUER` | `https://<your-app>.up.railway.app` | **Must exactly match the public origin.** It is the OAuth issuer and the RFC 9728 resource identifier. A mismatch breaks discovery. |
-| `PORTER_SIGNING_SECRET` | 32+ random characters, **stable** | Signs slot ids and confirmation tokens. Rotating it invalidates every outstanding one. Generate with `openssl rand -hex 32`. |
-| `PORTER_API_KEYS` | `<random-key>:<user-id>` | For the Muse custom-connector path. Share the key privately; `/docs` does not display it. |
-| `LOG_LEVEL` | `info` | |
-| `PORTER_DEMO_MODE` | `true` | Keep on: Meta's review runs end-to-end tests. |
-
-Leave these **unset** until the gates in `muse-compliance.md` are cleared:
-
-| Variable | Gate |
+| Setting | Value |
 |---|---|
-| `PORTER_SQUARE_ACCESS_TOKEN` | Upstream rights clearance + fixtures re-recorded against a real sandbox |
-| `PORTER_JOBBER_ACCESS_TOKEN` | Same, plus confirming Jobber's inferred mutation inputs |
-| `PORTER_STRIPE_SECRET_KEY` | Test keys only. The server refuses to boot with a live key unless `PORTER_ALLOW_LIVE_STRIPE=true`. |
+| Root Directory | `/` (repository root) |
+| Builder / Dockerfile Path | Dockerfile / `Dockerfile` |
+| Custom Build Command | Empty; the Dockerfile builds the workspace |
+| Start Command | `node apps/mcp-server/dist/index.js` |
+| Pre-Deploy Command | `node packages/db/dist/migrate.js` |
+| Pre-Deploy Timeout | `300` seconds |
+| Healthcheck Path / Timeout | `/readyz` / `30` seconds |
+| Restart Policy | On Failure, maximum 5 retries |
+| Replicas | One, in one region |
 
-`PORTER_SIGNING_SECRET` is required in production: the server throws at startup without it rather than generating one silently, because a generated secret would be different on every restart and would invalidate everything already issued.
+Railway's automatic monorepo import may select package-specific commands and
+watch only `/apps/mcp-server/**`. Replace those settings because shared packages
+also affect this app. Leave Watch Paths empty to build every change, or include:
 
-After setting variables, deploy the current checkout with `railway up`.
+```text
+/apps/**
+/packages/**
+/package.json
+/pnpm-lock.yaml
+/pnpm-workspace.yaml
+/tsconfig*.json
+/Dockerfile
+/.dockerignore
+/railway.json
+```
 
-The local OAuth flow accepts an unverified `porter_user` value. Production
-disables its `/oauth/*` endpoints. Use an API key for a personal Muse test;
-implement real user sign-in and persistent OAuth state before claiming OAuth
-support in a public connector submission.
+The existing `railway.json` contains Docker build and health/restart defaults;
+it does not configure migrations, variables, databases or domains. If this
+service uses legacy Config as Code, its file path is `/railway.json`, not
+`/apps/mcp-server/railway.json`. Check the resolved settings on the deployment
+before relying on that file. The settings above can be entered directly without
+adding a new config file. [Railway monorepo settings](https://docs.railway.com/deployments/monorepo),
+[build settings](https://docs.railway.com/builds/build-configuration).
 
-## 3. Persistent storage
+The migration pre-deploy step runs with service variables and private database
+access. A failure prevents deployment. [Pre-deploy commands](https://docs.railway.com/deployments/pre-deploy-command).
 
-For a persistent environment, add a Railway PostgreSQL service and set:
+## 2. Get the URL and register the Square callback
+
+Open the application service's **Settings → Networking → Public Networking →
+Generate Domain**, targeting port `8080`. Railway provides HTTPS; no purchased
+domain is needed for the website test.
+[Railway public networking](https://docs.railway.com/networking/public-networking).
+
+Set `PORTER_ISSUER` to that exact origin, such as
+`https://<pilot-service>.up.railway.app`, with no path or query. In the Porter
+Square application's **Sandbox OAuth** settings, add:
+
+```text
+https://<pilot-service>.up.railway.app/square/callback
+```
+
+Retain the local callback if needed. The hosted pilot requires a new **Continue
+with Square** authorization; local sessions and database records are not copied.
+The Square merchant callback is separate from Muse's customer callback.
+
+## 3. Configure sign-in email
+
+Hosted sign-in requires Resend. File email delivery is limited to local sandbox
+development and is rejected by the production Docker image.
+
+- **Personal web test:** use a Resend account/API key and
+  `PORTER_EMAIL_FROM=onboarding@resend.dev`. Sign in with the email associated
+  with that Resend account; the test sender can deliver only to that address.
+  [Resend test-sender restriction](https://resend.com/docs/knowledge-base/403-error-resend-dev-domain).
+- **Other testers:** verify a domain you control in Resend and use a sender at
+  that domain. [Resend domain verification](https://resend.com/docs/dashboard/domains/introduction).
+
+Keep sign-in link tracking disabled. Open the email link in the browser where
+it was requested; a different browser cannot complete that sign-in.
+
+## 4. Set application variables
+
+Enter these in the **pilot application's** Railway Variables tab. Store secrets
+there, never in the repository, issues or chat.
 
 | Variable | Value |
 |---|---|
-| `DATABASE_URL` | Railway's private PostgreSQL connection URL |
+| `NODE_ENV` | `production` (also set by the Dockerfile) |
+| `PORT` | `8080` |
+| `PORTER_ISSUER` | Exact generated HTTPS origin |
+| `PORTER_PILOT_ENABLED` | `true` |
+| `PORTER_DEMO_MODE` | `false` |
 | `PORTER_STORAGE` | `postgres` |
-| `PORTER_ENCRYPTION_KEY` | A separate stable 32-byte random key, encoded as 64 hexadecimal characters |
+| `DATABASE_URL` | Private database reference, e.g. `${{Postgres.DATABASE_URL}}`; substitute the actual PostgreSQL service name |
+| `PORTER_SIGNING_SECRET` | Stable random value, at least 32 characters |
+| `PORTER_ENCRYPTION_KEY` | Separate stable random 32-byte key, encoded as 64 hexadecimal characters |
+| `PORTER_SQUARE_ENVIRONMENT` | `sandbox` |
+| `PORTER_SQUARE_APPLICATION_ID` | Porter Square sandbox application ID |
+| `PORTER_SQUARE_APPLICATION_SECRET` | That sandbox application's secret |
+| `PORTER_EMAIL_MODE` | `resend` |
+| `PORTER_RESEND_API_KEY` | Resend API key authorized for the sender |
+| `PORTER_EMAIL_FROM` | Sender from step 3 |
+| `PORTER_PILOT_INVITED_EMAILS` | Comma-separated emails permitted to activate businesses; use your test email first |
+| `PORTER_INTERNAL_API_KEYS` | `false` |
+| `LOG_LEVEL` | `info` |
 
-Keep `PORTER_SIGNING_SECRET` stable too. Run `node packages/db/dist/migrate.js`
-as the PostgreSQL environment's pre-deploy command before starting the server.
-Do not add that command to the memory-only demo. Startup checks schema history
-and the encryption key before accepting traffic; `/readyz` checks database
-access. `/healthz` remains process liveness.
+Generate the two Porter secrets independently in a password manager or private
+shell; `openssl rand -hex 32` produces one suitable value. Preserve both across
+redeployments. Replacing the encryption key breaks access to existing encrypted
+data; rotating the signing secret invalidates pending confirmations.
 
-Migrations are transactional and checksum-verified. Back up the database and
-encryption/signing secrets, and exercise a restore into a separate environment
-before real onboarding. Do not rotate the encryption key by simply replacing
-the variable; existing encrypted data needs an explicit rewrapping procedure.
+Optional: reserve operator emails with `PORTER_OPERATOR_EMAILS`; the operator console remains unfinished. Leave
+`PORTER_MUSE_CONNECTOR_URL` unset until Meta approves an actual Porter listing
+URL on `https://muse.ai`; the UI displays publication as pending.
 
-Redis is not currently used. Rate limits and development OAuth sessions remain
-in memory. Production disables development OAuth. Static connector keys remain
-temporary until the pilot's individual credential lifecycle is implemented.
+Keep `PORTER_API_KEYS`, `PORTER_SQUARE_ACCESS_TOKEN`,
+`PORTER_JOBBER_ACCESS_TOKEN`, `PORTER_STRIPE_SECRET_KEY`, `PORTER_WEB_SOURCES`
+and `PORTER_SQUARE_PUBLIC_SOURCES` unset or empty. Pilot startup rejects mixing
+these legacy settings with merchant-scoped authorization. Internal API keys are
+also refused on hosted pilots. Merchant grants replace a global Square token.
 
-## 4. Verify the deployment
+## 5. Deploy and test
 
-```bash
-BASE=https://<your-app>.up.railway.app
+Deploy the configured `main` revision, completing any Railway deployment
+approval for this pilot service. Check the source revision, Docker build,
+migration output and readiness result.
 
-curl -s $BASE/healthz
-curl -s $BASE/readyz
-curl -s $BASE/.well-known/oauth-protected-resource | jq
-curl -s -i -X POST $BASE/mcp -d '{}' | head -3     # expect 401 + WWW-Authenticate
-curl -s $BASE/docs | head -20
+Using the public origin, run:
+
+```sh
+PORTER_PILOT_ORIGIN='https://<pilot-service>.up.railway.app'
+curl -fsS "$PORTER_PILOT_ORIGIN/readyz"
+curl -fsS "$PORTER_PILOT_ORIGIN/.well-known/oauth-protected-resource"
+curl -fsS "$PORTER_PILOT_ORIGIN/.well-known/oauth-authorization-server"
+curl -sS -i -X POST "$PORTER_PILOT_ORIGIN/mcp" \
+  -H 'Content-Type: application/json' -d '{}'
 ```
 
-The 401 must carry a `WWW-Authenticate` header pointing at the
-protected-resource metadata. That is how an MCP client discovers authentication.
+Readiness must report `storage: "postgres"` and `mode: "pilot-sandbox"`.
+The unauthenticated MCP request must return `401` with an OAuth
+`WWW-Authenticate` header. Metadata URLs must use this HTTPS origin.
 
-## 5. Point Muse at it
+Open the origin itself in a browser:
 
-Once `PORTER_ISSUER` is a real HTTPS origin, `<issuer>/mcp` is what goes in the
-submission form's **Hosted MCP endpoint** field, with connection type
-**Existing MCP**. Run `pnpm submission:validate` first.
+1. Submit a public website URL and review the preview. JavaScript-heavy sites
+   can require manual completion.
+2. Sign in with your invited email and confirm the private email link in the
+   same browser.
+3. Choose **Continue with Square** using the sandbox test account. Select a
+   supported location, review actual Square services and policies, and activate
+   only the synthetic salon used for testing.
+4. Check `/owner` after a redeploy for persistence. Open `/connect` for customer
+   authorization management and the current Muse publication state.
 
-For a personal test, ask Muse to create a **Custom Connector** for the endpoint
-and provide the API key privately. Meta's public help page does not specify a
-guaranteed MCP custom-connector flow, so verify the connection in Muse.
+The website supports merchant onboarding. Customer bookings use the six
+OAuth-authenticated MCP tools; there is no standalone browser booking checkout.
+Full Muse testing also requires Muse's actual OAuth client and connector
+access. Deployment alone does not publish a Muse listing.
 
-## Notes
+## Recovery and rollout
 
-- **Scaling past one instance** still requires shared rate limiting. With
-  PostgreSQL enabled, confirmation consumption and retry reservations are
-  already coordinated by database constraints.
-- **Do not rotate `PORTER_SIGNING_SECRET`** as routine hygiene. It is a
-  user-visible action: outstanding confirmations stop working.
+Keep one application replica: some MCP rate limits and transport sessions remain
+process-local. PostgreSQL persists identities, OAuth grants, merchant
+connections, confirmations and retries. No Redis or application filesystem
+volume is needed.
+
+Back up PostgreSQL and stable encryption/signing keys. Startup checks the exact
+migration ledger; rolling back to code predating applied migrations fails.
+Retain migration compatibility or use a reviewed database restore. Never rewrite
+applied SQL. See [database recovery notes](../packages/db/README.md).
+
+Before real-user launch, finish the remaining operations, retention/deletion
+and support work, configure accurate public privacy/terms/support pages, and
+complete Meta review. See [current state](session-handoff.md),
+[pilot behavior](pilot-local-development.md) and the
+[submission checklist](../submission/checklist.md).
+
+## Historical personal demo
+
+The earlier Railway service was a memory-backed mock MCP demo using a private
+API key. Its configuration and credentials are separate from this pilot and the
+published Muse flow. For local mock testing, use
+[local development](local-development.md). Keep pilot migrations and merchant
+and email credentials out of a memory-only demo service.

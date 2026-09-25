@@ -33,7 +33,7 @@ Targets: three participating salons, ten genuine bookings, owner setup under fiv
 | [#12](https://github.com/Nsilswal/Porter/pull/12) | Isolated merchant booking routing, name lookup, owned existing-booking management, fresh cancellation and final price/policy checks. 750 tests. |
 | [#13](https://github.com/Nsilswal/Porter/pull/13) | Customer OAuth storage v5 and protocol service, PKCE/resource bindings, refresh rotation/reuse detection, consent and owned revocation. 823 tests. |
 
-All merged increments above passed independent review, exact committed-state tests with PostgreSQL, GitHub CI and secret scanning. [PR #14](https://github.com/Nsilswal/Porter/pull/14) contains public onboarding, customer OAuth HTTP/UI wiring and accurate pilot/submission documentation. The integrated workspace passed 850 tests across 43 files with PostgreSQL, plus the browser/Square checks below. Consult the PR for final committed-state checks and merge status before resuming.
+All merged increments above passed independent review, exact committed-state tests with PostgreSQL, GitHub CI and secret scanning. [PR #14](https://github.com/Nsilswal/Porter/pull/14) contains public onboarding, customer OAuth HTTP/UI wiring and accurate pilot/submission documentation. The integrated workspace passed 850 tests across 43 files with PostgreSQL, plus the browser/Square checks below. PR #14 merged as `0312622edf1e94ecbd5b47ae7d81a90c08a05ab2` after final independent review, 850 committed-state tests, CI and secret scanning.
 
 ## Current implementation and local evidence
 
@@ -70,7 +70,7 @@ Never rewrite applied migrations v1–v5. The exact migration ledger check means
 
 ## Next work and launch gates
 
-1. Finish/review/merge the onboarding and customer OAuth HTTP/UI increment, including exact-state tests and browser evidence. Verify pending PR state rather than repeating completed work.
+1. Onboarding and customer OAuth HTTP/UI shipped in PR #14. The user now wants a public web test on Railway. The deployment guide describes the unified website/MCP service. Email is the remaining external setup input: Resend can send to its account email from `onboarding@resend.dev` for an individual test without a custom domain. A question about existing Resend access versus setting up individual testing is pending. Do not enable file-email mode on public hosting.
 2. Extend the now-passing OAuth-authenticated sandbox lifecycle to Square refresh/disconnect/reconnect, multiple customers and merchants, policy variants and notifications. Verify actual Muse behavior separately.
 3. Implement owner booking history/counts, restricted operator recovery and reconciliation for uncertain writes/ambiguous revocation. Never release uncertain guards merely because time passed.
 4. Add verified Square webhooks/recovery sync and website refresh preserving owner edits. Complete deletion/request handling and settle retention/support/public policies.
@@ -79,7 +79,7 @@ Never rewrite applied migrations v1–v5. The exact migration ledger check means
 
 ## Railway continuity
 
-The existing project `ideal-amazement` has one service, `@porter/mcp-server`, connected to `Nsilswal/Porter` main. Its running endpoint was the earlier personal mock demo at `https://portermcp-server-production.up.railway.app/mcp`; GitHub-triggered deployment approval was pending when last inspected. Merges may queue deployments. No manual Railway deployment or approval was performed during this increment. Verify current state before changing it, and keep pilot credentials separate. The previously disclosed demo key must be rotated before any reuse for real users.
+The existing project `ideal-amazement` has one service, `@porter/mcp-server`, connected to `Nsilswal/Porter` main. On 2026-09-25 Railway reported successful automatic deployment of main commit `0312622edf1e94ecbd5b47ae7d81a90c08a05ab2`. The running endpoint is `https://portermcp-server-production.up.railway.app/mcp`; its configuration remains mock demo (`PORTER_DEMO_MODE=true`, pilot flag absent, no database/email/Square application configuration). `/readyz` returns memory/demo, and `/` returns404. No manual Railway deployment, approval or variable change was performed. Public pilot testing needs its database, email, credentials and callback configured; keep pilot credentials separate from the demo. The previously disclosed demo key must be rotated before any reuse for real users.
 
 ## Document precedence
 
