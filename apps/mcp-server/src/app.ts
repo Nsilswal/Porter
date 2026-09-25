@@ -1,13 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { BookingEngine, MemoryPayoutDirectory, RateLimiter, RecordingPaymentGateway, createSigner, type Actor, type PaymentGateway } from "@porter/core";
+import { BookingEngine, MemoryPayoutDirectory, RateLimiter, RecordingPaymentGateway, createSigner, type Actor, type PaymentGateway, type Store } from "@porter/core";
 import { createStripeGateway } from "@porter/payments-stripe";
 import { createFetchHttpClient } from "@porter/shared";
-import { createMemoryStore, type MemoryStore } from "@porter/db";
+import { createMemoryStore, createPostgresStore } from "@porter/db";
 import { buildAdapters } from "./adapters.js";
 import { createLogger, systemClock, type Logger } from "@porter/shared";
 import { AuthServer, SCOPES } from "./auth.js";
 import { buildMcpServer, createTransport } from "./server.js";
-import { loadConfig, type PorterConfig } from "./config.js";
+import { loadConfig, validateStorageConfig, type PorterConfig } from "./config.js";
 import { connectorDocs } from "./docs.js";
 
 export interface PorterApp {
@@ -16,7 +16,7 @@ export interface PorterApp {
   readonly payments: PaymentGateway;
   readonly payouts: MemoryPayoutDirectory;
   readonly auth: AuthServer;
-  readonly store: MemoryStore;
+  readonly store: Store;
   readonly config: PorterConfig;
   listen(port?: number): Promise<number>;
   close(): Promise<void>;
@@ -37,15 +37,22 @@ export interface PorterApp {
  * pointing at the protected-resource metadata. That challenge is what lets an
  * MCP client discover how to authenticate without being told out of band.
  */
-export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
-  const config = { ...loadConfig(), ...overrides };
+export async function createApp(overrides: Partial<PorterConfig> = {}): Promise<PorterApp> {
+  const config = loadConfig(process.env, overrides);
+  validateStorageConfig(config);
   const log: Logger = createLogger({ level: config.logLevel, base: { app: "porter-mcp" } });
 
-  const store = createMemoryStore();
   const { adapters, credentials } = buildAdapters(config, log);
-
   const payments = buildPaymentGateway(config, log);
   const payouts = new MemoryPayoutDirectory();
+  const signer = createSigner(config.signingSecret);
+  const persistent = config.storage === "postgres"
+    ? await createPostgresStore({
+      connectionString: config.databaseUrl!,
+      encryptionKey: Buffer.from(config.encryptionKey!, "hex"),
+    })
+    : undefined;
+  const store = persistent ?? createMemoryStore();
 
   const engine = new BookingEngine({
     adapters,
@@ -53,7 +60,7 @@ export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
     store,
     clock: systemClock,
     log,
-    signer: createSigner(config.signingSecret),
+    signer,
     // Two independent buckets. The per-adapter one protects Porter's standing
     // with each platform: exceeding a published quota risks API access for
     // every Porter user, not just the one making the requests.
@@ -76,10 +83,15 @@ export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
     oauthEnabled: config.devOAuthEnabled,
   });
 
+  const sessions = new Set<() => Promise<void>>();
+  let closing: Promise<void> | undefined;
   const server = createServer((req, res) => {
-    handle(req, res, { engine, auth, log, config }).catch((error: unknown) => {
-      log.error("request_failed", { cause: String(error) });
+    if (closing) return sendJson(res, 503, { error: "shutting_down" });
+    handle(req, res, { engine, auth, log, config, sessions, ready: async () => { await persistent?.health(); } }).catch(() => {
+      // Driver/provider exceptions can contain query parameters or credentials.
+      log.error("request_failed");
       if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
+      else res.end();
     });
   });
 
@@ -92,8 +104,10 @@ export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
     store,
     config,
     listen(port = config.port) {
-      return new Promise<number>((resolve) => {
+      return new Promise<number>((resolve, reject) => {
+        server.once("error", reject);
         server.listen(port, () => {
+          server.off("error", reject);
           const address = server.address();
           const actual = typeof address === "object" && address ? address.port : port;
           log.info("listening", { port: actual, issuer: config.issuer });
@@ -102,7 +116,27 @@ export function createApp(overrides: Partial<PorterConfig> = {}): PorterApp {
       });
     },
     close() {
-      return new Promise<void>((resolve) => server.close(() => resolve()));
+      closing ??= (async () => {
+        const drained = new Promise<void>((resolve, reject) => {
+          server.close((error) => {
+            if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") reject(error);
+            else resolve();
+          });
+        });
+        // SSE clients keep requests open indefinitely. Close their transports
+        // and bound draining of incomplete requests before closing the DB pool.
+        const deadline = setTimeout(() => server.closeAllConnections(), 5_000);
+        deadline.unref();
+        try {
+          await Promise.allSettled([...sessions].map((close) => close()));
+          server.closeIdleConnections();
+          await drained;
+        } finally {
+          clearTimeout(deadline);
+          await persistent?.close();
+        }
+      })();
+      return closing;
     },
   };
 }
@@ -112,6 +146,8 @@ interface Deps {
   auth: AuthServer;
   log: Logger;
   config: PorterConfig;
+  ready(): Promise<void>;
+  sessions: Set<() => Promise<void>>;
 }
 
 async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Promise<void> {
@@ -119,6 +155,14 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   const path = url.pathname;
 
   if (path === "/healthz") return sendJson(res, 200, { ok: true });
+  if (path === "/readyz") {
+    try {
+      await deps.ready();
+      return sendJson(res, 200, { ok: true, storage: deps.config.storage, mode: deps.config.demoMode ? "demo" : "provider" });
+    } catch {
+      return sendJson(res, 503, { ok: false });
+    }
+  }
 
   // Required by the Muse submission form (documentationUrl), and served from
   // the app so it cannot drift from the deployed endpoint or demo credentials.
@@ -210,7 +254,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
       res.writeHead(401, { "WWW-Authenticate": deps.auth.challengeHeader(), "Content-Type": "application/json" });
       return void res.end(JSON.stringify({ error: "unauthorized" }));
     }
-    const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 500);
+    const limit = Number(url.searchParams.get("limit") ?? 100);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      return sendJson(res, 400, { error: "invalid_limit" });
+    }
     return sendJson(res, 200, await deps.engine.getAuditTrail({ id: ctx.userId }, limit));
   }
 
@@ -225,13 +272,26 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
     const mcp = buildMcpServer(deps.engine, actor, deps.log.child({ actor: ctx.userId, auth: ctx.method }));
     const transport = createTransport();
 
-    res.on("close", () => {
-      void transport.close();
-      void mcp.close();
-    });
+    let closed: Promise<void> | undefined;
+    const close = (): Promise<void> => {
+      closed ??= Promise.resolve()
+        .then(() => Promise.allSettled([transport.close(), mcp.close()]))
+        .then(() => {
+          res.end();
+          deps.sessions.delete(close);
+        });
+      return closed;
+    };
+    deps.sessions.add(close);
+    res.on("close", () => { void close(); });
 
-    await mcp.connect(transport);
-    await transport.handleRequest(req, res);
+    try {
+      await mcp.connect(transport);
+      await transport.handleRequest(req, res);
+    } catch (error) {
+      await close();
+      throw error;
+    }
     return;
   }
 

@@ -7,6 +7,10 @@ export interface PorterConfig {
   readonly apiKeys: Record<string, string>;
   readonly logLevel: "debug" | "info" | "warn" | "error";
   readonly demoMode: boolean;
+  readonly storage: "memory" | "postgres";
+  readonly databaseUrl: string | undefined;
+  /** Hex-encoded, 32-byte wrapping key. Separate from the signing secret. */
+  readonly encryptionKey: string | undefined;
   /** The development-only OAuth flow accepts an unverified user id. */
   readonly devOAuthEnabled: boolean;
   readonly adapterLatencyMs: number;
@@ -34,19 +38,9 @@ export interface PorterConfig {
   readonly squarePublicSourcesPath: string | undefined;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, overrides: Partial<PorterConfig> = {}): PorterConfig {
   const port = Number(env.PORT ?? 8080);
   const issuer = (env.PORTER_ISSUER ?? `http://localhost:${port}`).replace(/\/$/, "");
-
-  // A generated secret is fine for local development, but it would silently
-  // invalidate every slot id and confirmation token on restart in production.
-  let signingSecret = env.PORTER_SIGNING_SECRET ?? "";
-  if (!signingSecret) {
-    if (env.NODE_ENV === "production") {
-      throw new Error("PORTER_SIGNING_SECRET must be set in production.");
-    }
-    signingSecret = randomBytes(32).toString("hex");
-  }
 
   const apiKeys: Record<string, string> = {};
   for (const pair of (env.PORTER_API_KEYS ?? "").split(",")) {
@@ -54,13 +48,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
     if (key && userId) apiKeys[key.trim()] = userId.trim();
   }
 
-  return {
+  const databaseUrl = Object.hasOwn(overrides, "databaseUrl") ? overrides.databaseUrl : (env.DATABASE_URL || undefined);
+  const storage = overrides.storage || env.PORTER_STORAGE || (databaseUrl ? "postgres" : "memory");
+  if (storage !== "memory" && storage !== "postgres") {
+    throw new Error("PORTER_STORAGE must be memory or postgres.");
+  }
+
+  const config: PorterConfig = {
     port,
     issuer,
-    signingSecret,
+    signingSecret: env.PORTER_SIGNING_SECRET ?? "",
     apiKeys,
     logLevel: (env.LOG_LEVEL as PorterConfig["logLevel"]) ?? "info",
     demoMode: env.PORTER_DEMO_MODE !== "false",
+    encryptionKey: env.PORTER_ENCRYPTION_KEY || undefined,
     devOAuthEnabled: env.NODE_ENV !== "production",
     adapterLatencyMs: Number(env.PORTER_MOCK_LATENCY_MS ?? 0),
     adapterFailureRate: Number(env.PORTER_MOCK_FAILURE_RATE ?? 0),
@@ -81,5 +82,37 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PorterConfig {
     },
     webSourcesPath: env.PORTER_WEB_SOURCES || undefined,
     squarePublicSourcesPath: env.PORTER_SQUARE_PUBLIC_SOURCES || undefined,
+    ...overrides,
+    storage,
+    databaseUrl,
   };
+  // Decide whether a secret may be generated only after applying overrides.
+  // Durable confirmations must never depend on a fresh process-local key.
+  if (!config.signingSecret) {
+    if (env.NODE_ENV === "production" || config.storage === "postgres") {
+      throw new Error("PORTER_SIGNING_SECRET must be set for production or PostgreSQL storage.");
+    }
+    return { ...config, signingSecret: randomBytes(32).toString("hex") };
+  }
+  return config;
+}
+
+/** Validate the final configuration, including programmatic overrides. */
+export function validateStorageConfig(config: PorterConfig): void {
+  if (config.storage === "memory") {
+    if (!config.demoMode || config.squareAccessToken || config.jobberAccessToken || config.squarePublicSourcesPath || config.stripeSecretKey) {
+      throw new Error("Provider writes require PostgreSQL. Memory storage is only for the mock demo; set DATABASE_URL and PORTER_ENCRYPTION_KEY.");
+    }
+    return;
+  }
+  if (!config.databaseUrl) throw new Error("DATABASE_URL is required for PostgreSQL storage.");
+  if (!config.encryptionKey || !/^[a-f0-9]{64}$/i.test(config.encryptionKey)) {
+    throw new Error("PORTER_ENCRYPTION_KEY must be exactly 32 random bytes encoded as 64 hexadecimal characters.");
+  }
+  if (config.encryptionKey === config.signingSecret) {
+    throw new Error("Use different values for PORTER_ENCRYPTION_KEY and PORTER_SIGNING_SECRET.");
+  }
+  // A random development signing secret would make durable confirmations
+  // unusable after restart, even though their database records survived.
+  if (config.signingSecret.length < 32) throw new Error("PORTER_SIGNING_SECRET must contain at least 32 characters.");
 }

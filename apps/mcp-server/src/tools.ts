@@ -34,7 +34,7 @@ export interface ToolDefinition {
   readonly name: string;
   readonly title: string;
   readonly description: string;
-  readonly inputSchema: z.ZodTypeAny;
+  readonly inputSchema: z.AnyZodObject;
   readonly readOnly: boolean;
   handle(engine: BookingEngine, actor: Actor, args: any, signal: AbortSignal): Promise<unknown>;
 }

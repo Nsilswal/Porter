@@ -1,6 +1,6 @@
 # Porter — Architecture and Plan
 
-**Status:** Proposal. Awaiting approval before any implementation.
+**Status:** Historical prototype plan. The [accepted salon pilot PRD](./product-prd.md) supersedes conflicting product scope; use the [current implementation plan](./implementation-plan.md) for the next phase. The original sections below are retained for architectural background.
 **Date:** 2026-09-21 · updated the same day with the Muse Connector Terms
 **Companion docs:** [`muse-requirements.md`](./muse-requirements.md) · [`reference/muse-connector-terms-2026-09-18.md`](./reference/muse-connector-terms-2026-09-18.md)
 **Decided:** hosting is **Railway**. Database is **Railway Postgres**.

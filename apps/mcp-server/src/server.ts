@@ -29,7 +29,7 @@ export function buildMcpServer(engine: BookingEngine, actor: Actor, log: Logger)
       {
         title: tool.title,
         description: tool.description,
-        inputSchema: (tool.inputSchema as any).shape,
+        inputSchema: tool.inputSchema.shape,
         annotations: {
           readOnlyHint: tool.readOnly,
           destructiveHint: tool.name === "cancel_booking",
@@ -46,7 +46,9 @@ export function buildMcpServer(engine: BookingEngine, actor: Actor, log: Logger)
           return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
         } catch (error) {
           if (!PorterError.is(error)) {
-            log.error("tool_failed", { tool: tool.name, cause: String(error) });
+            // Database errors can embed SQL parameters. Keep operational logs
+            // useful without recording provider tokens or customer payloads.
+            log.error("tool_failed", { tool: tool.name });
           } else {
             log.info("tool_error", { tool: tool.name, code: error.code });
           }

@@ -34,12 +34,18 @@ const money = (m: { amount: number; currency: string } | null) =>
   m ? `$${(m.amount / 100).toFixed(2)}` : "—";
 
 async function main(): Promise<void> {
-  const app = createApp({
+  const app = await createApp({
     port: 0,
     apiKeys: { [KEY]: USER },
     signingSecret: "demo-signing-secret-that-is-long-enough-000",
     logLevel: "error",
     demoMode: true,
+    storage: "memory",
+    squareAccessToken: undefined,
+    jobberAccessToken: undefined,
+    stripeSecretKey: undefined,
+    squarePublicSourcesPath: undefined,
+    webSourcesPath: undefined,
   });
   const port = await app.listen(0);
   const base = `http://127.0.0.1:${port}`;

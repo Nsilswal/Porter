@@ -71,20 +71,23 @@ export const SCOPES = ["bookings:read", "bookings:write", "payments:write"] as c
 export type Scope = (typeof SCOPES)[number];
 
 export class AuthServer {
+  readonly #apiKeys = new Map<string, string>();
   readonly #clients = new Map<string, RegisteredClient>();
   readonly #codes = new Map<string, PendingAuthorization>();
   readonly #tokens = new Map<string, AccessToken>();
   readonly #refresh = new Map<string, { userId: string; clientId: string; scope: string }>();
-  readonly #options: Required<Omit<AuthServerOptions, "apiKeys">> & { apiKeys: Readonly<Record<string, string>> };
+  readonly #options: Required<Omit<AuthServerOptions, "apiKeys">>;
 
   constructor(options: AuthServerOptions) {
     this.#options = {
       issuer: options.issuer.replace(/\/$/, ""),
       resource: options.resource,
-      apiKeys: options.apiKeys ?? {},
       oauthEnabled: options.oauthEnabled ?? true,
       accessTokenTtlMs: options.accessTokenTtlMs ?? 60 * 60_000,
     };
+    for (const [key, userId] of Object.entries(options.apiKeys ?? {})) {
+      this.#apiKeys.set(createHash("sha256").update(key).digest("hex"), userId);
+    }
   }
 
   /** RFC 9728. Pointed at by the WWW-Authenticate header on a 401. */
@@ -209,20 +212,21 @@ export class AuthServer {
   /** Returns null when the credential is absent or invalid. */
   authenticate(authorizationHeader: string | undefined, apiKeyHeader?: string | string[]): AuthContext | null {
     if (authorizationHeader) {
-      const [scheme, value] = authorizationHeader.split(" ");
-      if (scheme?.toLowerCase() === "bearer" && value) {
+      const match = /^Bearer ([^\s]+)$/i.exec(authorizationHeader);
+      const value = match?.[1];
+      if (value) {
         const token = this.#tokens.get(value);
         if (token && token.expiresAt > Date.now()) {
           return { userId: token.userId, scopes: token.scope.split(" ").filter(Boolean), method: "oauth" };
         }
-        const userId = this.#options.apiKeys[value];
+        const userId = this.#apiKeys.get(createHash("sha256").update(value).digest("hex"));
         if (userId) return { userId, scopes: [...SCOPES], method: "api_key" };
       }
     }
     // Some custom connector UIs send a raw key as X-API-Key rather than
     // constructing an Authorization header.
     if (typeof apiKeyHeader === "string") {
-      const userId = this.#options.apiKeys[apiKeyHeader];
+      const userId = this.#apiKeys.get(createHash("sha256").update(apiKeyHeader).digest("hex"));
       if (userId) return { userId, scopes: [...SCOPES], method: "api_key" };
     }
     return null;

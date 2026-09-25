@@ -18,7 +18,8 @@ const API_KEY = "test-key-abc";
 const OTHER_API_KEY = "test-key-xyz";
 
 beforeAll(async () => {
-  app = createApp({
+  app = await createApp({
+    storage: "memory",
     port: 0,
     apiKeys: { [API_KEY]: "user_integration", [OTHER_API_KEY]: "user_other" },
     signingSecret: "integration-signing-secret-long-enough-01",
@@ -64,7 +65,8 @@ describe("auth surface", () => {
   });
 
   it("disables development OAuth on an API-key-only deployment", async () => {
-    const productionApp = createApp({
+    const productionApp = await createApp({
+      storage: "memory",
       port: 0,
       apiKeys: { [API_KEY]: "user_integration" },
       signingSecret: "integration-signing-secret-long-enough-01",
@@ -417,7 +419,8 @@ describe("payments and audit over the wire", () => {
 
 describe("rate limiting", () => {
   it("refuses a runaway agent with a retry hint it can explain", async () => {
-    const limited = createApp({
+    const limited = await createApp({
+      storage: "memory",
       port: 0,
       apiKeys: { "rl-key": "user_rl" },
       signingSecret: "rate-limit-signing-secret-long-enough-01",
@@ -447,5 +450,51 @@ describe("rate limiting", () => {
 
     await client.close();
     await limited.close();
+  });
+});
+
+describe("server shutdown", () => {
+  it("closes an authenticated idle SSE stream without waiting for the client to disconnect", async () => {
+    const { get } = await import("node:http");
+    const streamingApp = await createApp({
+      storage: "memory",
+      demoMode: true,
+      port: 0,
+      apiKeys: { "shutdown-test-key": "shutdown_user" },
+      signingSecret: "shutdown-signing-secret-at-least-32-characters",
+      devOAuthEnabled: false,
+      logLevel: "error",
+      squareAccessToken: undefined,
+      jobberAccessToken: undefined,
+      stripeSecretKey: undefined,
+      webSourcesPath: undefined,
+      squarePublicSourcesPath: undefined,
+    });
+    const port = await streamingApp.listen(0);
+    let response: import("node:http").ServerResponse | undefined;
+    streamingApp.server.on("request", (_request, res) => { response = res; });
+    const request = get(`http://127.0.0.1:${port}/mcp`, {
+      headers: { Authorization: "Bearer shutdown-test-key", Accept: "text/event-stream" },
+    });
+    request.on("error", () => undefined);
+    let closing: Promise<void> | undefined;
+    try {
+      // Wait for the server to open the stream. Headers need not have flushed
+      // to the client yet because the stream has no events to send.
+      await expect.poll(() => response?.headersSent).toBe(true);
+      expect(response?.statusCode).toBe(200);
+      expect(response?.writableEnded).toBe(false);
+
+      let closed = false;
+      closing = streamingApp.close().then(() => { closed = true; });
+      await expect.poll(() => closed, { timeout: 2_000 }).toBe(true);
+      expect(response?.destroyed || response?.writableEnded).toBe(true);
+    } finally {
+      // Cleanup also runs against the regression: a stuck stream must not
+      // make the entire test process hang after the failed assertion.
+      request.destroy();
+      streamingApp.server.closeAllConnections();
+      await (closing ?? streamingApp.close());
+    }
   });
 });
