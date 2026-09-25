@@ -152,6 +152,60 @@ CREATE TABLE import_drafts (
 );
 CREATE INDEX import_drafts_expiry_idx ON import_drafts(expires_at);
 `,
+}, {
+  version: 5,
+  sql: `
+CREATE TABLE customer_oauth_clients (
+  id text PRIMARY KEY, name text NOT NULL, redirect_uris jsonb NOT NULL CHECK (jsonb_typeof(redirect_uris) = 'array'),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE customer_oauth_requests (
+  request_hash text PRIMARY KEY CHECK (request_hash ~ '^[0-9a-f]{64}$'),
+  browser_nonce_hash text NOT NULL CHECK (browser_nonce_hash ~ '^[0-9a-f]{64}$'),
+  client_id text NOT NULL REFERENCES customer_oauth_clients(id) ON DELETE CASCADE,
+  redirect_uri text NOT NULL, resource text NOT NULL,
+  scopes jsonb NOT NULL CHECK (jsonb_typeof(scopes) = 'array' AND jsonb_array_length(scopes) > 0),
+  code_challenge text NOT NULL CHECK (code_challenge ~ '^[A-Za-z0-9_-]{43}$'), state text,
+  expires_at timestamptz NOT NULL, consumed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX customer_oauth_requests_expiry_idx ON customer_oauth_requests(expires_at);
+CREATE TABLE customer_oauth_grants (
+  id text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  client_id text NOT NULL REFERENCES customer_oauth_clients(id) ON DELETE CASCADE, resource text NOT NULL,
+  scopes jsonb NOT NULL CHECK (jsonb_typeof(scopes) = 'array' AND jsonb_array_length(scopes) > 0),
+  expires_at timestamptz NOT NULL, revoked_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX customer_oauth_grants_user_idx ON customer_oauth_grants(user_id);
+CREATE INDEX customer_oauth_grants_expiry_idx ON customer_oauth_grants(expires_at);
+CREATE TABLE customer_oauth_codes (
+  code_hash text PRIMARY KEY CHECK (code_hash ~ '^[0-9a-f]{64}$'),
+  request_hash text NOT NULL REFERENCES customer_oauth_requests(request_hash) ON DELETE CASCADE,
+  user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE, session_hash text NOT NULL,
+  client_id text NOT NULL REFERENCES customer_oauth_clients(id) ON DELETE CASCADE,
+  redirect_uri text NOT NULL, resource text NOT NULL,
+  scopes jsonb NOT NULL CHECK (jsonb_typeof(scopes) = 'array' AND jsonb_array_length(scopes) > 0),
+  code_challenge text NOT NULL CHECK (code_challenge ~ '^[A-Za-z0-9_-]{43}$'),
+  expires_at timestamptz NOT NULL, consumed_at timestamptz,
+  grant_id text REFERENCES customer_oauth_grants(id) ON DELETE CASCADE, created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (user_id, session_hash) REFERENCES pilot_sessions(user_id, session_hash) ON DELETE CASCADE,
+  CHECK ((consumed_at IS NULL AND grant_id IS NULL) OR (consumed_at IS NOT NULL AND grant_id IS NOT NULL))
+);
+CREATE UNIQUE INDEX customer_oauth_codes_request_idx ON customer_oauth_codes(request_hash);
+CREATE INDEX customer_oauth_codes_expiry_idx ON customer_oauth_codes(expires_at);
+CREATE TABLE customer_oauth_access_tokens (
+  token_hash text PRIMARY KEY CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+  grant_id text NOT NULL REFERENCES customer_oauth_grants(id) ON DELETE CASCADE,
+  expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX customer_oauth_access_grant_idx ON customer_oauth_access_tokens(grant_id);
+CREATE INDEX customer_oauth_access_expiry_idx ON customer_oauth_access_tokens(expires_at);
+CREATE TABLE customer_oauth_refresh_tokens (
+  token_hash text PRIMARY KEY CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+  grant_id text NOT NULL REFERENCES customer_oauth_grants(id) ON DELETE CASCADE,
+  consumed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX customer_oauth_refresh_grant_idx ON customer_oauth_refresh_tokens(grant_id);
+`,
 }] as const;
 
 function checksum(sql: string): string {
