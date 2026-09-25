@@ -1,6 +1,6 @@
 # Porter — session handoff
 
-Updated: 2026-09-24. Read this, [the PRD](product-prd.md), and [the implementation plan](implementation-plan.md).
+Updated: 2026-09-25. Read this, [the PRD](product-prd.md), and [the implementation plan](implementation-plan.md).
 
 ## Current instruction
 
@@ -44,7 +44,7 @@ Details: [local development](local-development.md), [database notes](../packages
 - The user explicitly requested continuing merchant sign-in, secure merchant connections, onboarding and the full Muse experience. [PR #8](https://github.com/Nsilswal/Porter/pull/8) merged the provider-side `SquareOAuthClient` after independent review and 425 passing committed-state tests with PostgreSQL. Browser/session/storage integration is the next increment.
 - The separate `PilotStore` adds migration v3 for email identities, hashed browser-bound sign-in/session tokens, customer connector hashes, owner-scoped businesses, OAuth state tied to the connection generation, encrypted merchant grants and shared rate limits. A durable exclusive disconnect claim prevents overlapping full-grant revocations from invalidating a later reconnect. Unknown revocation outcomes remain blocked for operator reconciliation; no automatic takeover is allowed. See [database notes](../packages/db/README.md). Verify this increment's committed-state tests and merge status before proceeding.
 - Docker Desktop is running. `pnpm db:up` provides PostgreSQL 17 on 127.0.0.1:55432, database/user/password porter (local development only). `pnpm db:down` preserves the volume.
-- Ignored `.env.square-sandbox` holds only a scoped sandbox access token and sandbox origin, with mode 0600. Load it explicitly for the smoke command; never copy it into a commit or the demo deployment. Merchant OAuth refresh is not yet implemented.
+- Ignored `.env.square-sandbox` holds only a scoped sandbox access token and sandbox origin, with mode 0600. Load it explicitly for the smoke command; never copy it into a commit or the demo deployment.
 - Ignored .env now uses local PostgreSQL and port **8081**, with generated stable signing/encryption secrets and restrictive file permissions. No secret values are documented. Another process already occupied 8080; do not kill it without identifying it.
 - Run `pnpm db:migrate` before `pnpm dev:mcp`. Never rewrite applied migration SQL. Migration v2 adds booking guards; v3 adds pilot identities/connections. The exact migration gate means rolling back application code after v3 requires retaining its migration ledger support or a reviewed database restore.
 - Run `TEST_DATABASE_URL=postgres://porter:porter@127.0.0.1:55432/porter pnpm test`. DB tests create/drop isolated schemas. Without TEST_DATABASE_URL they are skipped.
@@ -52,6 +52,10 @@ Details: [local development](local-development.md), [database notes](../packages
 - Mock provider state still resets on restart. Durable Porter mock records remain readable, but old mock appointments cannot reliably be changed through a new mock adapter. Mock booking references are now unique across processes.
 
 ## Next work
+
+Account/connection progress: [PR #9](https://github.com/Nsilswal/Porter/pull/9) merged the isolated pilot store after independent review, 449 passing committed-state tests, CI and secret scanning. The next increment adds browser-bound email links, persistent sessions, individual Muse keys, Square redirect/callback/refresh/disconnect orchestration and the six-tool pilot HTTP surface. See [pilot local development](pilot-local-development.md). Its tests use isolated PostgreSQL schemas; website import/activation and merchant routing remain separate changes. Verify that increment's review and merge state before treating it as delivered.
+
+An ignored, mode-0600 `.env.pilot` is configured for a separate local `porter_pilot` database on port 8082. The Square sandbox callback `http://localhost:8082/square/callback` is registered. Run migration/start commands with this explicit environment file. The application's sandbox secret is stored locally and is never documented here. Actual browser OAuth, onboarding and Muse validation are still pending.
 
 1. Integrate the OAuth client and pilot store into the owner HTTP flow, then test redirect/state, refresh/revocation, separate merchant isolation, policy variants and notification behavior. Basic account setup and the seven-scope lifecycle are complete. Sandbox API success does not establish production notification delivery or Muse behavior. The cancellation-policy UI failed in Square and omitted API fields remain unknown; activation must still require policy review.
 2. Complete Phase 1: owner/operator/customer identities, merchant connections/locations, encrypted provider token lifecycle, email-link sign-in and individual connector credentials. Static API keys/global provider tokens are still temporary.
