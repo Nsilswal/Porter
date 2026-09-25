@@ -153,14 +153,15 @@ Environment: **${config.pilot!.environment === "sandbox" ? "Square sandbox (test
 
 Porter connects customers to participating Square salons and spas. Merchants authorize Square separately from customer access. Only reviewed, active businesses can receive new appointments.
 
-## Connect your account
+## Connect from Muse
 
-1. Sign in at ${config.issuer}/signin using your email link.
-2. Open ${config.issuer}/connect and create an individual API key. Copy it when shown; Porter stores its hash and cannot display it again.
-3. In Muse's custom MCP connector settings, use server URL \`${config.issuer}/mcp\` and paste the raw API key without adding “Bearer”. Muse requires a publicly reachable HTTPS endpoint.
-4. Ask Muse to find your participating salon and show its services.
+Find Porter in Muse's connector directory and choose Connect. Sign in to Porter, review the requested access, and approve. Muse receives OAuth credentials automatically; customers never copy API keys or endpoint URLs.
 
-For direct HTTP clients, send \`Authorization: Bearer <your-key>\` or \`X-API-Key: <your-key>\`. Browser sign-in cookies do not authenticate MCP requests. Revoke an individual key on the connection page to stop its access.
+The hosted MCP endpoint is \`${config.issuer}/mcp\`. It advertises protected-resource metadata at \`${config.issuer}/.well-known/oauth-protected-resource\` and authorization-server metadata at \`${config.issuer}/.well-known/oauth-authorization-server\`. The pilot uses the authorization-code flow with S256 PKCE and resource-bound, individually scoped grants. Browser session cookies do not authenticate MCP requests.
+
+Manage or revoke connected applications at ${config.issuer}/connect. Disconnecting an application stops its account access; existing salon appointments remain in Square. Merchant Continue with Square is a separate authorization managed by the salon owner.
+
+Public Muse directory availability depends on Meta's review and approval. Local HTTP tests do not establish successful store installation or the actual Muse experience.
 
 ## Tools and confirmation
 
@@ -174,7 +175,7 @@ Pending and uncertain outcomes are not confirmations. Do not create a replacemen
 
 ## Data and availability
 
-Porter stores account and appointment records to preserve ownership, confirmation and retry safety. Square credentials are encrypted; customer connector keys are hashed. Disconnecting Square pauses access and leaves appointments in Square. It does not delete the customer's Square appointments or immediately erase Porter records.
+Porter stores account and appointment records to preserve ownership, confirmation and retry safety. Square credentials are encrypted; customer OAuth credentials are stored as hashes. Disconnecting Square pauses access and leaves appointments in Square. It does not delete the customer's Square appointments or immediately erase Porter records.
 
 Health: ${config.issuer}/healthz. Readiness: ${config.issuer}/readyz. Your authenticated audit trail: ${config.issuer}/v1/audit.
 

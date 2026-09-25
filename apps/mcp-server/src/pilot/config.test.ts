@@ -14,6 +14,21 @@ describe("pilot configuration isolation", () => {
     expect(() => loadPilotConfig(env, "https://porter.example")).toThrow("File email");
     expect(() => loadPilotConfig({ ...env, PORTER_SQUARE_ENVIRONMENT: "production" }, "https://localhost:8082")).toThrow("File email");
   });
+  it("disables customer API keys by default and confines internal keys to a local sandbox", () => {
+    expect(loadPilotConfig(env, "http://localhost:8082")?.internalApiKeys).toBe(false);
+    expect(loadPilotConfig({ ...env, PORTER_INTERNAL_API_KEYS: "true" }, "http://localhost:8082")?.internalApiKeys).toBe(true);
+    const settings = { ...env, PORTER_INTERNAL_API_KEYS: "true", PORTER_EMAIL_MODE: "resend", PORTER_RESEND_API_KEY: "test-email", PORTER_EMAIL_FROM: "signin@example.test" };
+    expect(() => loadPilotConfig(settings, "https://porter.example")).toThrow("Internal API keys");
+    expect(() => loadPilotConfig({ ...settings, NODE_ENV: "production" }, "https://localhost")).toThrow("Internal API keys");
+    expect(() => loadPilotConfig({ ...settings, PORTER_SQUARE_ENVIRONMENT: "production" }, "https://localhost")).toThrow("Internal API keys");
+  });
+  it("accepts only a configured HTTPS Muse listing URL", () => {
+    expect(loadPilotConfig(env, "http://localhost:8082")?.museConnectorUrl).toBeUndefined();
+    expect(loadPilotConfig({ ...env, PORTER_MUSE_CONNECTOR_URL: "https://muse.ai/platform" }, "http://localhost:8082")?.museConnectorUrl).toBe("https://muse.ai/platform");
+    for (const value of ["http://muse.ai", "https://muse.ai.attacker.test/", "https://name@muse.ai/", "https://muse.ai/#secret"]) {
+      expect(() => loadPilotConfig({ ...env, PORTER_MUSE_CONNECTOR_URL: value }, "http://localhost:8082")).toThrow();
+    }
+  });
   it("requires a fixed origin and email sender for a public deployment", () => {
     const publicEnv = { ...env, PORTER_EMAIL_MODE: "resend", PORTER_RESEND_API_KEY: "example-email-key", PORTER_EMAIL_FROM: "Porter <signin@example.test>" };
     expect(loadPilotConfig(publicEnv, "https://porter.example")?.email.mode).toBe("resend");

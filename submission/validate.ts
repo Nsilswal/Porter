@@ -1,10 +1,9 @@
 /**
  * Validate the submission packet against Muse's own rules.
  *
- * These checks are not invented. They are the client-side validator from
- * Muse's shipped `PlatformSubmissionForm` bundle, re-verified against the live
- * page on 2026-09-21. Running this before pasting means the form should not
- * reject anything.
+ * These checks reflect the submission form recorded on 2026-09-21.
+ * The current authenticated form must be rechecked before submission; passing
+ * this local validator establishes neither current policy compliance nor approval.
  *
  *   pnpm submission:validate
  */

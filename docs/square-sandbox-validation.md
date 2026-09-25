@@ -64,10 +64,10 @@ Captured examples and their provenance live in the adapter's [fixture directory]
 ## Remaining checks
 
 - **Policy eligibility:** The API returned cancellation currency without an amount and omitted cutoff/text fields. Porter correctly reports the policy as unknown. The sandbox Payments & cancellations page repeatedly returned Square's own error page, so no full policy configuration was verified. The successful API write does not prove a salon has no deposit/card/fee obligation. Keep the owner policy review and activation gate.
-- **OAuth and isolation:** Implement the actual owner authorization/state/callback, encrypted token refresh/revocation and merchant routing. Test two merchants and two customer identities, expired credentials and reconnects.
+- **OAuth and isolation:** Owner authorization/state/callback, encrypted token lifecycle and merchant routing are implemented; see the integrated validation below. Extend live tests to two merchants and two customer identities, expired credentials, refresh/disconnect/reconnect.
 - **Booking variants and recovery:** Pending acceptance, staff-specific prices, restricted policies, same-key update/cancel retries, lost responses/restarts against Square and operator reconciliation remain open. Pilot quote/UI work must reject unsupported reschedules before confirmation; adapter errors can currently retain conservative engine guards.
 - **Notifications and events:** No customer email/SMS delivery or webhook processing was verified. Square documents sandbox email limitations; production buyer notifications require their own evidence. [Sandbox limitations](https://developer.squareup.com/docs/devtools/sandbox/overview).
-- **Customer experience:** Run the complete lifecycle through Muse with individual credentials after merchant routing and eligibility are implemented. Keep the Railway personal mock demo separate.
+- **Customer experience:** Run the complete lifecycle through the actual Muse store connection with automatic customer OAuth. The local integration below does not establish Muse acceptance. Keep the Railway personal mock demo separate.
 
 ## Reproduce
 
@@ -80,3 +80,15 @@ node --env-file=.env.square-sandbox apps/mcp-server/dist/square-smoke.js
 ```
 
 The command creates synthetic customer records and test appointments, then cancels every appointment it can identify. Only the official sandbox origin is accepted; redirects and automatic HTTP retries are disabled. If cleanup fails or a create response is lost, inspect the sandbox using the reported run ID before another run.
+
+## Integrated pilot validation — 2026-09-25
+
+The local pilot now also passed a browser and MCP integration run using the synthetic salon, official merchant OAuth credentials and customer OAuth. No production resources or participating customer appointments were used.
+
+- Browser: email-link sign-in, official **Continue with Square**, callback, location/catalog review and activation. The website was an explicit `example.com` sandbox placeholder. Only the $65, 30-minute synthetic haircut was enabled; unpriced services were excluded.
+- Customer browser: explicit consent to a clearly named **Porter local OAuth test** client, automatic S256 code exchange with resource binding, all six MCP tools, refresh rotation and revocation. A loopback callback served as the test client. No customer API key was entered.
+- OAuth-authenticated MCP: named-salon discovery, availability, two-step confirmed booking, same-request replay returning the same booking, time-only confirmed reschedule, and two-step cancellation all passed through the actual merchant facade and Square sandbox.
+- Cleanup: two appointments were created across the diagnostic and successful runs; both cancellation responses reported cancelled. The diagnostic run stopped before rescheduling because the temporary harness compared the wrong time-field name; its `finally` cleanup cancelled that appointment. The corrected run completed. All local test OAuth grants were revoked, including the interrupted run's grant. Synthetic customer records remain in the sandbox.
+- Browser layout: the customer connection page has a persistent sandbox banner, no manual key instructions, and an explicit pending-directory-review notice.
+
+This is additional evidence beyond the earlier direct-adapter harness. It does not establish actual Muse compatibility, directory approval, multi-merchant live isolation, Square token refresh/disconnect/reconnect, production notifications, verified webhooks, or uncertain-outcome recovery. Square cancellation fields remain incomplete and unknown; the synthetic owner review does not verify omitted settings. Current automated tests cover many of these failure paths with fixtures, separately from this live evidence.

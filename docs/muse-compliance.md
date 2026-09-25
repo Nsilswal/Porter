@@ -1,115 +1,59 @@
-# Muse Connector Terms — compliance mapping
+# Muse salon pilot — compliance and readiness
 
-**Last verified against the live form and page:** 2026-09-21 (form chunk byte-identical to the 2026-09-18 capture)
-**Terms version:** 2026-09-18, stored at [`reference/muse-connector-terms-2026-09-18.md`](./reference/muse-connector-terms-2026-09-18.md)
+Updated against the implementation on 2026-09-25. This is an evidence map and launch checklist, not a declaration of compliance, approval, or publication.
 
-This is the document that answers a §4.4 audit. Each clause maps to where Porter satisfies it, with a file to look at.
+## Evidence and publication status
 
-Status key: **Done** · **Ops** (needs a running deployment or a human) · **Open** (unresolved)
+Muse's public [Connector Platform page](https://muse.ai/platform), checked on 2026-09-25, describes functional, security and legal review followed by directory appearance after approval. It does not establish Porter's approval or expose the current authenticated submission requirements, OAuth callbacks, or client configuration.
 
----
+Porter's accepted product requires a published Muse directory connector with account sign-in and OAuth consent. Customers must not have to copy an API key or configure an MCP endpoint. Directory publication and the actual Muse connection remain validation gates; local OAuth tests and the separate Square sandbox lifecycle do not establish either.
 
-## 2. Submission and approval
+The [2026-09-18 Connector Terms capture](reference/muse-connector-terms-2026-09-18.md) was captured on 2026-09-21 and is historical evidence only. Its clauses and incorporated policies must be checked in the authenticated Muse flow before submission. The mapping below uses that capture's section numbers without asserting that they are still current. The submission packet and validator also derive from an earlier form capture and need the same verification.
 
-| Clause | Requirement | Status | Where |
-|---|---|---|---|
-| §2.1 | Submission information must be true and accurate; functionality not obscured | Done | `submission/connector-submission.json` states plainly that Porter is a multi-business aggregator. Unknowable fields are `REPLACE_ME`, never guessed. `submission/validate.ts` refuses to pass while placeholders remain. |
-| §2.1 | Connector may be re-reviewed at any time | Ops | Demo mode stays enabled so a reviewer can re-test at will. |
-| §2.2 | Meta may remove any connector at any time | Done | Architecture does not depend on directory listing. The custom-connector path needs no approval, and the same MCP server serves Claude and ChatGPT. |
+## Current pilot scope
 
-## 3. Licences
+The pilot supports invited US salons and spas using Square Appointments, one location per business, English and USD. The six MCP tools are `search_providers`, `get_availability`, `create_booking`, `list_my_bookings`, `reschedule_booking` and `cancel_booking`. Granted `bookings:read` and `bookings:write` scopes limit the tools exposed to each customer. See [server registration](../apps/mcp-server/src/server.ts) and [tool definitions](../apps/mcp-server/src/tools.ts).
 
-| Clause | Requirement | Status | Where |
-|---|---|---|---|
-| §3.1 | Broad licence granted to Meta over Connector Content | **Open** | Porter can grant this over its own output. Whether it can sublicense **Square and Jobber business data** is the unresolved rights question. See §4.2. |
-| §3.3(d) | No misrepresenting affiliation with Meta | Done | No Meta branding anywhere. Porter's icon and name are its own. |
-| §3.3(e) | No circumventing rate limits or safety systems | Done | Porter rate-limits *itself*, per user and per adapter (`packages/core/src/ratelimit.ts`). |
+Payment is at the salon. The pilot exposes no payment, quote or provider-message tool. Activation requires fixed-price eligible services, an owner policy review, and an attestation that selected services have no deposit, prepayment, card-on-file, cancellation-fee or no-show-fee obligation. Known unsupported live fees block the affected operation. Missing provider policy fields stay unknown; owner attestation does not turn them into verified zero fees. See [catalog review](../apps/mcp-server/src/pilot/catalog.ts) and [merchant routing](../apps/mcp-server/src/pilot/adapter.ts).
 
-## 4. Developer obligations
+Customer OAuth is separate from merchant Square authorization. The customer protocol implements registered public clients, exact redirect and resource binding, S256 PKCE, browser-bound consent, expiring opaque access tokens, rotating refresh tokens, replay detection and revocation. Tokens are stored as hashes; merchant grants are encrypted. Names supplied during client registration are unverified. See [customer OAuth](../apps/mcp-server/src/pilot/customer-oauth.ts), [OAuth storage](../packages/db/src/customer-oauth.ts) and [merchant connections](../apps/mcp-server/src/pilot/connections.ts). Muse's actual client requirements still need authenticated verification.
 
-### §4.1 Functionality and accuracy
+Manual API keys are outside normal customer setup. The optional `PORTER_INTERNAL_API_KEYS=true` compatibility path is restricted to nonproduction, loopback, Square sandbox development and defaults off. The old mock demo is a separate environment and cannot stand in for a tested pilot connection.
 
-| Requirement | Status | Where |
+## Website import behavior
+
+Porter performs bounded public-page scraping during owner onboarding. The [importer](../apps/mcp-server/src/pilot/importer.ts) reads one HTML document, plus robots-policy requests and bounded redirects, as `PorterBot/1.0`. It extracts descriptions, contact details and structured service information for owner review. It executes no website scripts, loads no subresources, sends no login credentials or cookies, and submits no booking forms.
+
+Every request checks public destination addresses and pins a validated DNS result. Redirects repeat destination checks; page redirects also check the destination's robots policy. A disallow rule, malformed policy, or unverified robots response blocks the page read; robots HTTP 404/410 is treated as an absent policy. Network work has a 15-second deadline, at most four redirects per chain, and response/decompression limits. HTML parsing has a separate 256 KiB input limit and bounded structure; previews are capped at 60 KiB. Complex, protected or JavaScript-dependent sites can produce a limited or empty preview with warnings.
+
+Imported facts retain source URLs and require review. Square supplies bookable services, prices, duration, availability and booking rules. Website price ranges are descriptive evidence, never a fixed booking quote. Respecting robots policy does not establish rights to reuse or distribute a site's content; source permissions remain part of submission review.
+
+## Historical terms mapping
+
+“Implemented” below means code and automated evidence exist. Operational readiness and legal conclusions require their own verification.
+
+| Historical section or policy | Current evidence | Remaining gate |
 |---|---|---|
-| Perform as described in the submission | Done | Nine tools, matching the submission exactly. `apps/mcp-server/src/tools.ts` |
-| Accurate and up-to-date content | Done | Slots carry `fetchedAt` and are re-read from the provider immediately before commit. Stale availability is never bookable. `packages/core/src/engine.ts` (`#recheck`) |
-| Never invent data | Done | Unknown cancellation policy reports `known: false` rather than a zero fee. Unmappable service categories map to `null`, not a guess. Ratings are passed through with their source or omitted. |
-| Fix stale data and broken endpoints promptly | Ops | `GET /healthz`; uptime monitoring to be attached at deploy. |
-| Maintain support contact | Ops | `support` field in the submission packet. |
+| §2.1: accurate submission and review | [Submission packet](../submission/connector-submission.json) describes six salon tools, merchant routing, website import, OAuth and pay at salon. Unknown entity, domain and contact fields remain placeholders. | Recheck the authenticated form, provide accurate reviewer access and complete Meta review. No approval is claimed. |
+| §2.2: directory availability | The owner activation flow and customer connection page distinguish business activation from Muse publication. | Verify an approved listing and its actual URL before setting `PORTER_MUSE_CONNECTOR_URL`. |
+| §3.1 / §4.2: rights to supplied content | Pilot data comes from merchant-authorized Square access and reviewed public website imports. | Review current provider/source permissions and the authenticated Muse licence requirements. Owner connection is not blanket redistribution clearance. |
+| §3.3: affiliation and restrictions | Client names are marked unverified; provider requests, imports and account actions have bounds or rate limits. | Verify branding and actual client identity in the submission/review process. |
+| §4.1: functionality and accuracy | Live slot, policy and booking-state checks bind confirmation to current terms. Pending and uncertain outcomes remain distinct from confirmed results. | Exercise the supported journey inside Muse with separate customer accounts and authorized sandbox resources. |
+| §4.3(a), (e): scoped access | Owned Porter bookings select the merchant; caller credentials cannot select another merchant's token. Customer fields are projected per adapter. | Review deployed access settings and disclosure language against the final participating businesses. |
+| §4.3(b): incident handling | [Incident-response draft](../legal/incident-response.md) exists. | Verify current reporting obligations, contact routes and an operational response owner. |
+| §4.3(c), (d): privacy and controller obligations | [Privacy-notice draft](../legal/privacy-notice.md) describes the service. | Review it for the pilot's actual processing, verify current Meta data-protection requirements, and publish the final notice. |
+| §4.3(f): retention and deletion | Core booking/payment deletion helpers and OAuth revocation exist. Disconnecting does not cancel appointments in Square. | Complete and test a coordinated customer/owner deletion and retention workflow across identities, sessions, grants, imports, audit records and merchant recovery. Automated retention cleanup is not implemented. |
+| §4.3(g), §4.4: records and audit | [Audit records](../packages/core/src/audit.ts) retain pseudonymous actor IDs, argument hashes, outcomes and disclosed field names. PostgreSQL persists booking and retry evidence. | Treat pseudonymous records as privacy-relevant data; settle retention, support access and audit-response procedures. |
+| Policies: misleading content and prompt injection | Business text is untrusted data and sanitized at output boundaries. Unknown fields are disclosed rather than invented. | Verify the real Muse presentation; sanitization alone does not establish immunity from prompt injection. |
+| Policies: material terms and authorized actions | Create, reschedule and cancel use signed, single-use confirmations and live checks. Rescheduling preserves the original service, staff and duration. | Verify confirmation UX and notifications in Muse. Unknown provider write outcomes need operator reconciliation before retry. |
+| Policies: prohibited content / professional decisions | Accepted pilot scope is salons/spas; no medical services, professional determinations or customer profiling is intended. | Review participating catalogs and public descriptions; third-party content is not automatically compliant. |
+| §9.4 / §10: changed terms and Porter's terms | A dated reference capture and [Porter terms draft](../legal/terms-of-service.md) exist. | Reverify authenticated terms on submission day and obtain review of final public policies. |
 
-### §4.2 Rights and permissions — **the open item**
+## Before publication
 
-| Requirement | Status | Where |
-|---|---|---|
-| Represent that Porter holds all rights for Meta's exercise of §3.1 | **Open** | Porter surfaces Square and Jobber business data it does not own. Whether their developer terms permit sublicensing it to Meta on §3.1's terms has **not** been reviewed. `docs/plan.md` §9 item 7. |
-
-**This gates every real provider account.** Both remote adapters ship disabled by default (`apps/mcp-server/src/adapters.ts`), and Square defaults to its sandbox host. The mock adapter involves no third-party data, so demo mode and review are unaffected.
-
-§8 makes Porter indemnify Meta for claims arising from Connector Content, including IP and privacy. §9 caps Meta's own liability at $1,000. The risk is asymmetric and deliberate on Meta's part.
-
-### §4.3 Privacy and data handling
-
-| Clause | Requirement | Status | Where |
-|---|---|---|---|
-| §4.3(a) | Process User Data only as needed, within authorised scopes | Done | Adapter credentials are decrypted into a single call's `AdapterContext` and never held globally. `packages/core/src/adapter.ts` |
-| §4.3(b) | **Notify Meta within 48 hours** of a security incident | Done (runbook) | [`legal/incident-response.md`](../legal/incident-response.md) — clock starts at awareness, notify on partial information, addresses pre-filled. |
-| §4.3(c) | Publicly accessible privacy notice | Done (draft) | [`legal/privacy-notice.md`](../legal/privacy-notice.md); publish at `/privacy` before submitting. |
-| §4.3(d) | Porter is an **independent controller**, bound by Meta's DPA | Partial | Acknowledged throughout the privacy notice. **Meta's Data Protection Requirements have not yet been read** — `docs/muse-requirements.md` §8 item 3. |
-| §4.3(e) | No recipient gets broader access than Porter holds | Done | Per-adapter customer-field minimisation, enforced in the type system: forwarding an undeclared field is a compile error. `packages/core/src/customer.ts`, tested in `customer.test.ts` and `multi-adapter.test.ts`. |
-| §4.3(f) | Retain only as long as needed; delete on revocation or request | Done | `BookingEngine.deleteUserData` purges bookings, payments, idempotency records and the saved payment profile, then destroys the per-user encryption key so residual ciphertext is unreadable. Tested in `payments.test.ts`. |
-| §4.3(g) | Keep records sufficient to demonstrate compliance | Done | Append-only audit log holding **no personal data** — pseudonymous ids, argument hashes, outcomes, and the *names* of fields disclosed downstream. It survives a deletion request intact. `packages/core/src/audit.ts`; `assertNoPersonalData` runs on every append. |
-
-### §4.4 Prohibited practices and the annual audit
-
-| Requirement | Status | Where |
-|---|---|---|
-| Cooperate with an audit, once per year or on suspected violation | Done | This document, plus `GET /v1/audit` and the audit-log schema. |
-
-## Muse Connector Policies — prohibited practices
-
-| Policy | Status | Where |
-|---|---|---|
-| **Deceive users** | Done | Two-phase confirmation shows price, frequency, cancellation terms and penalties before commitment. A Jobber booking is reported `pending`, never `confirmed`, because the business has not scheduled it yet. |
-| **Compromise security** | Done | No dynamic code execution; credentials encrypted at rest; a redaction layer over every log line. |
-| **Exceed declared scope** · *"Non-deterministic skill(s) must define a bounded action range"* | Done | Exactly nine tools, all declared. Declared bounds: max single transaction USD 2,000; explicit approval flagged at or above USD 200; no action outside the nine tools. `submission/connector-submission.json` → `extraNotes` |
-| **Extract or reconstruct data** · *no prompt-injection vectors* | Done | All provider text is `UntrustedText` and cannot be serialised without `sanitize()`. Hostile records live in the default fixture set, so every test run exercises it. `packages/shared/src/untrusted.ts`, `packages/core/src/injection.test.ts` |
-| **Circumvent restrictions** · *violating robots.txt* | Done | **Porter never scrapes.** API only, at every layer — an architectural invariant, not a preference. |
-| **Infer or act on sensitive attributes** | Done | No user profiling and no recommendation model. Booking history answers `list_my_bookings` and nothing else. Medical, health, legal and financial categories are excluded from the taxonomy, with a test asserting it. `packages/core/src/taxonomy.ts` |
-| **Biometric identification** | N/A | Porter processes no biometric data. |
-| **High-consequence actions without explicit authorisation** | Done | Signed, single-use confirmation tokens binding the exact terms. The server re-derives the terms at commit and refuses if anything moved. No single-call path books or charges. |
-| **Fail to disclose material terms before financial commitment** | Done | The envelope carries cost, `recurrence`, `cancellationPolicy` and `nonRefundable`. The policy is fetched **before** any booking exists, via `getServiceCancellationPolicy`. Tested in `engine.test.ts`. |
-| **Act autonomously on professional determinations** | N/A | Porter gives no medical, legal or financial advice; those categories are out of scope. |
-
-## Muse Connector Policies — prohibited content
-
-Porter surfaces only beauty and home-service businesses from connected booking platforms, and generates no content of its own. Business text is sanitised and passed through as data.
-
-| Policy | Status |
-|---|---|
-| Illegal activity, NCII, harassment, unlawful discrimination | N/A — no user-generated or model-generated content |
-| **Practising regulated professions** | Done — medical, health, legal and financial categories excluded from the taxonomy |
-| Harm, weapons, self-harm | N/A |
-| **Deceive or mislead** · *fake reviews* | Done — ratings are passed through with their source or omitted. Porter never synthesises or blends a rating. |
-| Real-money gambling, unlawful tools | N/A |
-
-## 7.2 — the agent may paraphrase
-
-Muse may reword Porter's output, and §7.2 says that is not a breach. So the displayed summary is **never** the record of what was agreed. The signed token is, and the server re-derives the terms at commit time. `packages/core/src/confirmation.ts`
-
-## 9.4 / 10 — operational
-
-| Clause | Status | Where |
-|---|---|---|
-| §9.4 Terms may change on 30 days' notice | Ops | Dated local copy in `docs/reference/`. Re-verify before submission and periodically after. Last check 2026-09-21: unchanged. |
-| §10 Porter's own ToS must not bind users beyond Meta's terms | Done | [`legal/terms-of-service.md`](../legal/terms-of-service.md) deliberately omits arbitration, class-action waiver and user indemnity, with the reason stated in the document. |
-| §10 Governing law: California, San Mateo County | Noted | No conflicting clause in Porter's terms. |
-
----
-
-## Outstanding before submission
-
-1. **Upstream rights clearance** (§4.2) — the only genuinely open compliance item.
-2. **Read Meta's Data Protection Requirements** (§4.3(d)) at `facebook.com/legal/terms/Privacy`.
-3. Fill the `REPLACE_ME` fields and publish `/privacy` and `/terms`.
-4. Legal review of the three documents in `legal/`.
-5. Re-verify the Terms on the day of submission (§9.4).
+1. Verify the current authenticated Muse form, terms, incorporated policies, OAuth client-registration method, allowed callbacks and required scopes. Record the results without credentials.
+2. Complete provider/source rights review, final public policies, contact details and retention/deletion/support procedures.
+3. Deploy a separate HTTPS pilot with PostgreSQL, stable secrets and production email delivery; keep internal key mode disabled.
+4. Test account consent, callback completion, renewal, revocation, customer isolation and the six-tool lifecycle inside Muse. Use only appointments explicitly authorized for testing.
+5. Resolve unknown-outcome recovery and record remaining provider, notification and Muse limitations honestly.
+6. Submit accurate evidence, wait for approval, then verify the published directory journey. Business activation, local tests and the earlier mock deployment do not satisfy this gate.

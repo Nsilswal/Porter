@@ -10,6 +10,7 @@ import { buildMcpServer, createTransport } from "./server.js";
 import { loadConfig, validateStorageConfig, type PorterConfig } from "./config.js";
 import { connectorDocs } from "./docs.js";
 import { createPilotRuntime } from "./pilot/runtime.js";
+import { createPilotSquareAdapter } from "./pilot/adapter.js";
 import type { PilotWeb } from "./pilot/web.js";
 
 export interface PorterApp {
@@ -58,9 +59,12 @@ export async function createApp(overrides: Partial<PorterConfig> = {}): Promise<
   const store = persistent ?? createMemoryStore();
   let pilot: PilotWeb | undefined;
   try {
-    if (config.pilot) pilot = await createPilotRuntime(config.pilot, config.databaseUrl!, config.encryptionKey!);
+    if (config.pilot) {
+      pilot = await createPilotRuntime(config.pilot, config.databaseUrl!, config.encryptionKey!);
+      adapters.push(createPilotSquareAdapter({ store: pilot.options.store, connections: pilot.options.connections, environment: config.pilot.environment }));
+    }
   } catch (error) {
-    await persistent?.close();
+    await Promise.allSettled([pilot?.options.store.close(), pilot?.options.oauthStore?.close(), persistent?.close()]);
     throw error;
   }
 
@@ -97,7 +101,7 @@ export async function createApp(overrides: Partial<PorterConfig> = {}): Promise<
   let closing: Promise<void> | undefined;
   const server = createServer((req, res) => {
     if (closing) return sendJson(res, 503, { error: "shutting_down" });
-    handle(req, res, { engine, auth, log, config, sessions, pilot, ready: async () => { await persistent?.health(); await pilot?.options.store.health(); } }).catch(() => {
+    handle(req, res, { engine, auth, log, config, sessions, pilot, ready: async () => { await persistent?.health(); await pilot?.options.store.health(); await pilot?.options.oauthStore?.health(); } }).catch(() => {
       // Driver/provider exceptions can contain query parameters or credentials.
       log.error("request_failed");
       if (!res.headersSent) sendJson(res, 500, { error: "internal_error" });
@@ -144,7 +148,7 @@ export async function createApp(overrides: Partial<PorterConfig> = {}): Promise<
           await drained;
         } finally {
           clearTimeout(deadline);
-          const results = await Promise.allSettled([pilot?.options.store.close(), persistent?.close()]);
+          const results = await Promise.allSettled([pilot?.options.store.close(), pilot?.options.oauthStore?.close(), persistent?.close()]);
           const failure = results.find((result) => result.status === "rejected");
           if (failure?.status === "rejected") throw failure.reason;
         }
@@ -264,12 +268,16 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
 
   // The user's own audit trail. Meta tells Muse users they can see a
   // complete record of what their agent did, and Porter can back that — from
-  // hashes and outcomes alone, because the log holds no personal data.
+  // pseudonymous identifiers and outcomes without raw contact details.
   if (path === "/v1/audit" && req.method === "GET") {
     const ctx = await authenticate(req, deps);
     if (!ctx) {
-      res.writeHead(401, { "WWW-Authenticate": deps.auth.challengeHeader(), "Content-Type": "application/json" });
+      res.writeHead(401, { "WWW-Authenticate": challengeHeader(deps), "Content-Type": "application/json" });
       return void res.end(JSON.stringify({ error: "unauthorized" }));
+    }
+    if (!ctx.scopes.includes("bookings:read")) {
+      res.setHeader("WWW-Authenticate", deps.pilot?.options.oauth?.challengeHeader(["bookings:read"], "insufficient_scope") ?? deps.auth.challengeHeader());
+      return sendJson(res, 403, { error: "insufficient_scope" });
     }
     const limit = Number(url.searchParams.get("limit") ?? 100);
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
@@ -281,7 +289,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   if (path === "/mcp") {
     const ctx = await authenticate(req, deps);
     if (!ctx) {
-      res.writeHead(401, { "WWW-Authenticate": deps.auth.challengeHeader(), "Content-Type": "application/json" });
+      res.writeHead(401, { "WWW-Authenticate": challengeHeader(deps), "Content-Type": "application/json" });
       return void res.end(JSON.stringify({ error: "unauthorized" }));
     }
 
@@ -315,11 +323,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: Deps): Pr
   sendJson(res, 404, { error: "not_found" });
 }
 
+function challengeHeader(deps: Deps): string {
+  return deps.pilot?.options.oauth?.challengeHeader() ?? deps.auth.challengeHeader();
+}
+
 async function authenticate(req: IncomingMessage, deps: Deps): Promise<AuthContext | null> {
   if (!deps.pilot) return deps.auth.authenticate(req.headers.authorization, req.headers["x-api-key"]);
   const authorization = req.headers.authorization;
   const apiKey = req.headers["x-api-key"];
   if (Array.isArray(apiKey)) return null;
+  if (authorization && apiKey) return null;
+  const oauth = await deps.pilot.options.oauth?.authenticate(authorization);
+  if (oauth) return oauth;
+  if (!deps.config.pilot?.internalApiKeys) return null;
   const bearer = authorization ? /^Bearer (porter_[A-Za-z0-9_-]{43})$/i.exec(authorization)?.[1] : undefined;
   if (authorization && !bearer) return null;
   if (bearer && apiKey && bearer !== apiKey) return null;

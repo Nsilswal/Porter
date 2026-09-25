@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MerchantCredentials, PilotBusiness, PilotSession, PilotStore } from "@porter/db";
 import type { HttpClient, HttpRequest } from "@porter/shared";
-import { OwnerSquareCatalog, type ActivationSelection } from "./catalog.js";
+import { catalogReviewDigest, OwnerSquareCatalog, type ActivationSelection } from "./catalog.js";
 import { tokenHash } from "./security.js";
 
 const NOW = new Date("2026-09-25T12:00:00Z");
@@ -67,6 +67,23 @@ function fixture() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Square owner catalog review", () => {
+  it("binds authoritative review values without treating fetch time, credential refresh or list order as changed terms", async () => {
+    const f = fixture();
+    f.data.objects = [item("FIRST"), item("SECOND")];
+    const review = await f.service.review(SESSION, BUSINESS.id, "LOCATION");
+    const digest = catalogReviewDigest(review);
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(catalogReviewDigest({ ...review, connectionVersion: review.connectionVersion + 1, fetchedAt: "2027-01-01T00:00:00Z",
+      locations: [...review.locations].reverse(), services: [...review.services].reverse() })).toBe(digest);
+    for (const change of [
+      { services: review.services.map((service) => ({ ...service, priceMinor: 7000 })) },
+      { services: review.services.map((service) => ({ ...service, durationMinutes: 60 })) },
+      { policy: { ...review.policy, cancellationWindowSeconds: 172_800 } },
+      { locations: review.locations.map((location) => ({ ...location, address: "New address" })) },
+      { merchantId: "CHANGED_MERCHANT" },
+    ]) expect(catalogReviewDigest({ ...review, ...change })).not.toBe(digest);
+  });
+
   it("lists merchant locations without implicitly choosing the first location", async () => {
     const f = fixture();
     const review = await f.service.review(SESSION, BUSINESS.id);
